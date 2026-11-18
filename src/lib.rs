@@ -9,11 +9,12 @@ use crate::input::{
     BoundAction, RemoteMapper, AKEYCODE_BACK, AKEYCODE_DPAD_CENTER, AKEYCODE_DPAD_DOWN,
     AKEYCODE_DPAD_LEFT, AKEYCODE_DPAD_RIGHT, AKEYCODE_DPAD_UP, AKEYCODE_ENTER, AKEYCODE_HOME,
 };
-use crate::ui::{AppTile, FocusZone, LauncherUi, UiAction, SETTINGS_TILE_PKG};
+use crate::settings_pill::SettingsCategory;
+use crate::ui::{AppTile, FocusZone, LauncherUi, SideEffect, SETTINGS_TILE_PKG};
 use android_activity::input::{InputEvent, KeyAction, MotionAction};
 use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
-use jni::sys::jint;
+use jni::sys::{jboolean, jint};
 use jni::JNIEnv;
 use ndk::native_window::NativeWindow;
 use once_cell::sync::Lazy;
@@ -30,8 +31,8 @@ struct SharedState {
     tz_offset_ms: i64,
     screen_dims: (f32, f32),
     pending_launch_pkg: Option<String>,
-    pending_voice_search: bool,
-    pending_settings_action: Option<&'static str>,
+    pending_kill_pkg: Option<String>,
+    pending_effect: SideEffect,
     scene_dirty: bool,
     needs_redraw: bool,
 }
@@ -53,8 +54,8 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         tz_offset_ms: 0,
         screen_dims: (1920.0, 1080.0),
         pending_launch_pkg: None,
-        pending_voice_search: false,
-        pending_settings_action: None,
+        pending_kill_pkg: None,
+        pending_effect: SideEffect::None,
         scene_dirty: true,
         needs_redraw: true,
     })
@@ -149,7 +150,11 @@ fn refresh_timezone_offset(app: &AndroidApp) -> Option<i64> {
     Some(offset as i64)
 }
 
-fn format_clock_greeting_date(tz_offset_ms: i64, user_name: &str) -> (String, String, String) {
+fn format_clock_greeting_date(
+    tz_offset_ms: i64,
+    user_name: &str,
+    clock_24h: bool,
+) -> (String, String, String) {
     let utc_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -158,11 +163,15 @@ fn format_clock_greeting_date(tz_offset_ms: i64, user_name: &str) -> (String, St
     let total_mins = local_secs.div_euclid(60).rem_euclid(24 * 60);
     let h24 = (total_mins / 60) as u32;
     let m = (total_mins % 60) as u32;
-    let h12 = match h24 % 12 {
-        0 => 12,
-        v => v,
+    let time_str = if clock_24h {
+        format!("{:02}:{:02}", h24, m)
+    } else {
+        let h12 = match h24 % 12 {
+            0 => 12,
+            v => v,
+        };
+        format!("{}:{:02}", h12, m)
     };
-    let time_str = format!("{}:{:02}", h12, m);
 
     let greet_prefix = if h24 < 12 {
         "Good morning"
@@ -236,10 +245,17 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
 
     let animating = st.ui.tick_animations();
     let (time_str, greeting_str, date_str) =
-        format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name);
+        format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name, st.ui.clock_24h);
     let key_label = st.mapper.last_captured_label.clone();
-    st.ui
-        .render(&mut pixmap, &time_str, &greeting_str, &date_str, &key_label);
+    let bound_count = st.mapper.bound_count;
+    st.ui.render(
+        &mut pixmap,
+        &time_str,
+        &greeting_str,
+        &date_str,
+        &key_label,
+        bound_count,
+    );
 
     if let Ok(mut buf) = window.lock(None) {
         let stride_px = buf.stride().max(0) as usize;
@@ -263,22 +279,13 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     animating
 }
 
-fn queue_ui_action(st: &mut SharedState, act: UiAction) {
-    match act {
-        UiAction::None => {}
-        UiAction::OpenWifiSettings => st.pending_settings_action = Some("android.settings.WIFI_SETTINGS"),
-        UiAction::OpenDisplaySettings => st.pending_settings_action = Some("android.settings.DISPLAY_SETTINGS"),
-        UiAction::OpenAccessibilitySettings => st.pending_settings_action = Some("android.settings.ACCESSIBILITY_SETTINGS"),
-        UiAction::OpenAndroidSettings => st.pending_settings_action = Some("android.settings.SETTINGS"),
-    }
-}
-
 fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
     let launch_pkg = st.pending_launch_pkg.take();
-    let do_voice = std::mem::take(&mut st.pending_voice_search);
-    let settings_act = st.pending_settings_action.take();
+    let kill_pkg = st.pending_kill_pkg.take();
+    let effect = std::mem::replace(&mut st.pending_effect, SideEffect::None);
+    let secure_mode = st.ui.sys.adb_mode_secure;
 
-    if launch_pkg.is_none() && !do_voice && settings_act.is_none() {
+    if launch_pkg.is_none() && kill_pkg.is_none() && effect == SideEffect::None {
         return;
     }
 
@@ -295,16 +302,71 @@ fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
                     );
                 }
             }
-            if do_voice {
-                let _ = env.call_method(&act_obj, "triggerVoiceAssistFromRust", "()V", &[]);
-            }
-            if let Some(action_str) = settings_act {
-                if let Ok(j_act) = env.new_string(action_str) {
+            if let Some(kpkg) = kill_pkg {
+                if let Ok(j_pkg) = env.new_string(&kpkg) {
                     let _ = env.call_method(
                         &act_obj,
-                        "openSystemActionFromRust",
+                        "killBackgroundPackageFromRust",
                         "(Ljava/lang/String;)V",
-                        &[(&j_act).into()],
+                        &[(&j_pkg).into()],
+                    );
+                }
+            }
+            match effect {
+                SideEffect::None => {}
+                SideEffect::OpenWifiSettings => {
+                    let _ = env.call_method(&act_obj, "openWifiSettingsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenBluetoothSettings => {
+                    let _ = env.call_method(&act_obj, "openBluetoothSettingsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenSoundSettings => {
+                    let _ = env.call_method(&act_obj, "openSoundSettingsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenDisplaySettings => {
+                    let _ = env.call_method(&act_obj, "openDisplaySettingsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenInputsOrTvSettings => {
+                    let _ = env.call_method(&act_obj, "openInputsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenAccessibilitySettings => {
+                    let _ = env.call_method(&act_obj, "openAccessibilitySettingsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenAndroidSettings => {
+                    let _ = env.call_method(&act_obj, "openAndroidSettingsFromRust", "()V", &[]);
+                }
+                SideEffect::OpenDefaultHomePicker => {
+                    let _ = env.call_method(&act_obj, "openHomePickerFromRust", "()V", &[]);
+                }
+                SideEffect::TriggerVoiceSearch => {
+                    let _ = env.call_method(&act_obj, "triggerVoiceAssistFromRust", "()V", &[]);
+                }
+                SideEffect::LockScreenNow => {
+                    let _ = env.call_method(&act_obj, "lockScreenFromRust", "()V", &[]);
+                }
+                SideEffect::CleanMemoryNow => {
+                    let _ = env.call_method(&act_obj, "cleanMemoryFromRust", "()V", &[]);
+                }
+                SideEffect::RunAdbPairAndGrant => {
+                    let _ = env.call_method(
+                        &act_obj,
+                        "runLocalAdbPairFromRust",
+                        "(Z)V",
+                        &[JValue::Bool(if secure_mode { 1 } else { 0 })],
+                    );
+                }
+                SideEffect::ToggleAdbPort => {
+                    let _ = env.call_method(&act_obj, "toggleAdbPortFromRust", "()V", &[]);
+                }
+                SideEffect::RefreshSystemSnapshot => {
+                    let _ = env.call_method(&act_obj, "refreshSystemSnapshot", "()V", &[]);
+                }
+                SideEffect::SetKeepScreenOn(on) => {
+                    let _ = env.call_method(
+                        &act_obj,
+                        "setKeepScreenOnFromRust",
+                        "(Z)V",
+                        &[JValue::Bool(if on { 1 } else { 0 })],
                     );
                 }
             }
@@ -314,9 +376,28 @@ fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
 
 fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
     match act {
-        BoundAction::OpenSettingsPill => {
-            st.ui.weather_popup_open = false;
-            st.ui.settings.toggle();
+        BoundAction::OpenControlCenter => {
+            if st.ui.control_center_open {
+                st.ui.control_center_open = false;
+            } else {
+                st.ui.open_control_center();
+                st.pending_effect = SideEffect::RefreshSystemSnapshot;
+            }
+        }
+        BoundAction::OpenSettings => {
+            if st.ui.settings.open {
+                st.ui.settings.open = false;
+            } else {
+                st.ui.control_center_open = false;
+                st.ui.settings.open_at(SettingsCategory::Appearance);
+                st.pending_effect = SideEffect::RefreshSystemSnapshot;
+            }
+        }
+        BoundAction::OpenRecentApps => {
+            st.ui.control_center_open = false;
+            st.ui.settings.open = false;
+            st.ui.recent_apps_open = !st.ui.recent_apps_open;
+            st.pending_effect = SideEffect::RefreshSystemSnapshot;
         }
         BoundAction::ToggleClockStyle => {
             st.ui.clock_style = (st.ui.clock_style + 1) % 3;
@@ -327,7 +408,7 @@ fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
             st.scene_dirty = true;
         }
         BoundAction::TriggerVoiceAssist => {
-            st.pending_voice_search = true;
+            st.pending_effect = SideEffect::TriggerVoiceSearch;
         }
         BoundAction::LaunchApp(pkg) => {
             st.pending_launch_pkg = Some(pkg);
@@ -356,6 +437,47 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnRemoteKey(
     if let Ok(mut st) = STATE.lock() {
         if let Some(act) = st.mapper.on_raw_key(key_code, scan_code) {
             apply_bound_action(&mut st, act);
+        }
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeUpdateSystemStatus(
+    mut env: JNIEnv,
+    _class: JClass,
+    wifi_label: JString,
+    bt_on: jboolean,
+    dnd_on: jboolean,
+    ram_used_mb: jint,
+    ram_total_mb: jint,
+    adb_port_open: jboolean,
+    a11y_enabled: jboolean,
+    default_home: jboolean,
+    write_secure: jboolean,
+    status_msg: JString,
+) {
+    let wifi: String = env
+        .get_string(&wifi_label)
+        .map(|s| s.into())
+        .unwrap_or_else(|_| "Connected".into());
+    let msg: String = env
+        .get_string(&status_msg)
+        .map(|s| s.into())
+        .unwrap_or_default();
+
+    if let Ok(mut st) = STATE.lock() {
+        st.ui.sys.wifi_label = wifi;
+        st.ui.sys.bt_on = bt_on != 0;
+        st.ui.sys.dnd_on = dnd_on != 0;
+        st.ui.sys.ram_used_mb = ram_used_mb.max(0) as u32;
+        st.ui.sys.ram_total_mb = ram_total_mb.max(1) as u32;
+        st.ui.sys.adb_port_open = adb_port_open != 0;
+        st.ui.sys.a11y_enabled = a11y_enabled != 0;
+        st.ui.sys.default_home = default_home != 0;
+        st.ui.sys.write_secure = write_secure != 0;
+        if !msg.is_empty() {
+            st.ui.settings.status_banner = Some(msg);
         }
         st.request_redraw();
     }
@@ -440,38 +562,83 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
         return true;
     }
 
+    let row_count = if st.ui.settings.open {
+        st.ui
+            .build_settings_rows(&st.mapper.last_captured_label, st.mapper.bound_count)
+            .len()
+    } else {
+        0
+    };
+
     match kc {
         AKEYCODE_DPAD_LEFT => {
-            st.ui.move_dpad(-1, 0);
+            st.ui.move_dpad(-1, 0, row_count);
             st.needs_redraw = true;
             true
         }
         AKEYCODE_DPAD_RIGHT => {
-            st.ui.move_dpad(1, 0);
+            st.ui.move_dpad(1, 0, row_count);
             st.needs_redraw = true;
             true
         }
         AKEYCODE_DPAD_UP => {
-            st.ui.move_dpad(0, -1);
+            if st.ui.recent_apps_open {
+                let app_count = st.ui.apps.len().saturating_sub(1);
+                if app_count > 0 {
+                    let idx = st.ui.recent_selected % app_count;
+                    if let Some(tile) = st.ui.apps.get(idx) {
+                        st.pending_kill_pkg = Some(tile.package_name.clone());
+                    }
+                }
+            } else {
+                st.ui.move_dpad(0, -1, row_count);
+            }
             st.needs_redraw = true;
             true
         }
         AKEYCODE_DPAD_DOWN => {
-            st.ui.move_dpad(0, 1);
+            st.ui.move_dpad(0, 1, row_count);
             st.needs_redraw = true;
             true
         }
         AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
-            if st.ui.settings.open {
-                if st.ui.settings.selected == 4 {
-                    st.mapper.capture_mode = true;
-                    st.mapper.last_captured_label = "Press button now...".into();
+            if st.ui.ambient_mode_open {
+                st.ui.ambient_mode_open = false;
+            } else if st.ui.settings.open {
+                if !st.ui.settings.in_right_pane {
+                    st.ui.settings.move_right(row_count);
                 } else {
-                    let (dirty, act) = st.ui.activate_selected_setting(1);
-                    if dirty {
-                        st.scene_dirty = true;
+                    let rows = st
+                        .ui
+                        .build_settings_rows(&st.mapper.last_captured_label, st.mapper.bound_count);
+                    if let Some(item) = rows.get(st.ui.settings.row_idx) {
+                        let (dirty, eff, start_capture) =
+                            st.ui.execute_setting_action(item.action_id);
+                        if dirty {
+                            st.scene_dirty = true;
+                        }
+                        if start_capture {
+                            st.mapper.capture_mode = true;
+                            st.mapper.last_captured_label = "Press remote button now…".into();
+                        }
+                        if eff != SideEffect::None {
+                            st.pending_effect = eff;
+                        }
                     }
-                    queue_ui_action(st, act);
+                }
+            } else if st.ui.control_center_open {
+                let (eff, _) = st.ui.activate_control_center_item();
+                if eff != SideEffect::None {
+                    st.pending_effect = eff;
+                }
+            } else if st.ui.recent_apps_open {
+                let app_count = st.ui.apps.len().saturating_sub(1);
+                if app_count > 0 {
+                    let idx = st.ui.recent_selected % app_count;
+                    if let Some(tile) = st.ui.apps.get(idx) {
+                        st.ui.recent_apps_open = false;
+                        st.pending_launch_pkg = Some(tile.package_name.clone());
+                    }
                 }
             } else if st.ui.weather_popup_open {
                 st.ui.weather_popup_open = false;
@@ -481,12 +648,14 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
                         st.ui.weather_popup_open = true;
                     }
                     FocusZone::TopControlCenter => {
-                        st.ui.settings.toggle();
+                        st.ui.open_control_center();
+                        st.pending_effect = SideEffect::RefreshSystemSnapshot;
                     }
                     FocusZone::Dock => {
                         if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
                             if app_tile.package_name == SETTINGS_TILE_PKG {
-                                st.ui.settings.toggle();
+                                st.ui.settings.open_at(SettingsCategory::Appearance);
+                                st.pending_effect = SideEffect::RefreshSystemSnapshot;
                             } else {
                                 st.pending_launch_pkg = Some(app_tile.package_name.clone());
                             }
@@ -498,16 +667,24 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
             true
         }
         AKEYCODE_BACK => {
-            if st.ui.settings.open {
-                st.ui.settings.open = false;
-                st.needs_redraw = true;
+            if st.ui.ambient_mode_open {
+                st.ui.ambient_mode_open = false;
+            } else if st.ui.settings.open {
+                if st.ui.settings.in_right_pane {
+                    st.ui.settings.in_right_pane = false;
+                } else {
+                    st.ui.settings.open = false;
+                }
+            } else if st.ui.control_center_open {
+                st.ui.control_center_open = false;
+            } else if st.ui.recent_apps_open {
+                st.ui.recent_apps_open = false;
             } else if st.ui.weather_popup_open {
                 st.ui.weather_popup_open = false;
-                st.needs_redraw = true;
             } else if st.ui.focus_zone != FocusZone::Dock {
                 st.ui.focus_zone = FocusZone::Dock;
-                st.needs_redraw = true;
             }
+            st.needs_redraw = true;
             true
         }
         AKEYCODE_HOME => {
@@ -647,11 +824,13 @@ pub fn android_main(app: AndroidApp) {
                                 let y = ptr.y();
                                 let mut st = STATE.lock().unwrap();
                                 let (sw, sh) = st.screen_dims;
-                                let (pkg, act) = st.ui.handle_tap(x, y, sw, sh);
+                                let (pkg, eff) = st.ui.handle_tap(x, y, sw, sh);
                                 if let Some(p) = pkg {
                                     st.pending_launch_pkg = Some(p);
                                 }
-                                queue_ui_action(&mut st, act);
+                                if eff != SideEffect::None {
+                                    st.pending_effect = eff;
+                                }
                                 st.needs_redraw = true;
                                 return InputStatus::Handled;
                             }

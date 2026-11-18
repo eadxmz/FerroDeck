@@ -1,7 +1,4 @@
 //! Crisp 1:1 pixel-aligned Glass Clock & Header Text rasterizer using `fontdue`.
-//! Renders glyphs directly in physical framebuffer pixels with a frosted top-to-bottom
-//! glass gradient fill, crisp white outer rim, and soft depth shadow so text is 100% sharp
-//! at 720p, 1080p, and 4K without Android `sp`/`dp` bilinear scaling blur.
 
 use fontdue::{Font, FontSettings};
 use tiny_skia::{Color, Pixmap, PixmapPaint, PremultipliedColorU8, Transform};
@@ -47,26 +44,6 @@ impl CrispClock {
         }
     }
 
-    pub fn measure_width(&self, text: &str, style: u8, size_px: f32) -> f32 {
-        let font = if style == 0 {
-            self.font_big.as_ref().or(self.font_ui.as_ref())
-        } else {
-            self.font_ui.as_ref().or(self.font_big.as_ref())
-        };
-        let Some(font) = font else {
-            return text.len() as f32 * size_px * 0.45;
-        };
-        let px = size_px.round().max(12.0);
-        let mut w = 0.0f32;
-        for ch in text.chars() {
-            let (m, _) = font.rasterize(ch, px);
-            w += m.advance_width;
-        }
-        w
-    }
-
-    /// Draws the clock centered horizontally around `center_x` at top `top_y`.
-    /// `style`: 0 = Giant Refractive Glass Clock, 1 = Top-Right Header Clock, 2 = Hidden.
     pub fn draw_centered(
         &mut self,
         target: &mut Pixmap,
@@ -144,7 +121,6 @@ impl CrispClock {
             let gh = metrics.height.max(1) as f32;
 
             for row in 0..metrics.height {
-                // Vertical frosted glass gradient (brighter specular top & bottom rim)
                 let t = (row as f32 / gh).clamp(0.0, 1.0);
                 let rim_boost = if t < 0.14 || t > 0.86 { 1.08 } else { 0.94 };
 
@@ -156,7 +132,6 @@ impl CrispClock {
                     let px_x = gx + col as i32;
                     let px_y = gy + row as i32;
                     if px_x >= 0 && px_y >= 0 && (px_x as u32) < w && (px_y as u32) < h {
-                        // Soft elevation drop shadow
                         let sx = px_x + 2;
                         let sy = px_y + 3;
                         if (sx as u32) < w && (sy as u32) < h {
@@ -172,7 +147,6 @@ impl CrispClock {
                         let base_alpha = if style == 0 { 222.0 } else { 248.0 };
                         let fg_a = ((alpha as f32 / 255.0) * base_alpha * rim_boost)
                             .clamp(0.0, 255.0) as u8;
-                        // Subtle cool lavender-white glass tint matching Night Scenes
                         let r = (242.0 + t * 13.0).min(255.0) as u8;
                         let g = (244.0 + t * 8.0).min(255.0) as u8;
                         let b = 255u8;
@@ -187,7 +161,6 @@ impl CrispClock {
     }
 }
 
-/// Helper to draw crisp single-line UI text (greetings, dates, tooltips) at exact pixel coordinates.
 pub fn draw_crisp_label(
     pm: &mut Pixmap,
     font: Option<&Font>,
@@ -225,7 +198,7 @@ pub fn draw_crisp_label(
                         let sy = px_y + 1;
                         if sx < w && sy < h {
                             let s_idx = (sy * w + sx) as usize;
-                            let sa = ((a as u32 * 110) / 255) as u8;
+                            let sa = ((a as u32 * 105) / 255) as u8;
                             let sh = Color::from_rgba8(0, 0, 0, sa).premultiply().to_color_u8();
                             pm.pixels_mut()[s_idx] = blend_over(pm.pixels()[s_idx], sh);
                         }

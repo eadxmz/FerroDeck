@@ -26,10 +26,12 @@ pub fn pack_key_id(key_code: i32, scan_code: i32) -> u32 {
     (sc << 16) | kc
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoundAction {
-    OpenSettingsPill,
+    OpenControlCenter,
+    OpenSettings,
+    OpenRecentApps,
     ToggleClockStyle,
     CycleWallpaper,
     TriggerVoiceAssist,
@@ -41,22 +43,25 @@ pub struct RemoteMapper {
     pub capture_mode: bool,
     pub last_captured_key_id: Option<u32>,
     pub last_captured_label: String,
+    pub bound_count: usize,
 }
 
 impl RemoteMapper {
     pub fn new() -> Self {
         let mut bindings = HashMap::new();
-        bindings.insert(pack_key_id(AKEYCODE_MENU, 0), BoundAction::OpenSettingsPill);
-        bindings.insert(pack_key_id(AKEYCODE_SETTINGS, 0), BoundAction::OpenSettingsPill);
+        bindings.insert(pack_key_id(AKEYCODE_MENU, 0), BoundAction::OpenControlCenter);
+        bindings.insert(pack_key_id(AKEYCODE_SETTINGS, 0), BoundAction::OpenSettings);
         bindings.insert(pack_key_id(AKEYCODE_PROG_YELLOW, 0), BoundAction::TriggerVoiceAssist);
         bindings.insert(pack_key_id(AKEYCODE_VOICE_ASSIST, 0), BoundAction::TriggerVoiceAssist);
         bindings.insert(pack_key_id(AKEYCODE_ASSIST, 0), BoundAction::TriggerVoiceAssist);
         bindings.insert(pack_key_id(AKEYCODE_SEARCH, 0), BoundAction::TriggerVoiceAssist);
+        let bound_count = bindings.len();
         Self {
             bindings,
             capture_mode: false,
             last_captured_key_id: None,
-            last_captured_label: "Press OK then remote key".into(),
+            last_captured_label: "Press OK then remote button".into(),
+            bound_count,
         }
     }
 
@@ -81,8 +86,9 @@ impl RemoteMapper {
 
         if self.capture_mode && !Self::is_reserved_nav(key_code) && key_code != AKEYCODE_HOME {
             self.last_captured_key_id = Some(key_id);
-            self.last_captured_label = format!("Bound kc={} sc={}", key_code, scan_code);
-            self.bindings.insert(key_id, BoundAction::OpenSettingsPill);
+            self.last_captured_label = format!("KEY (#{} / sc:{})", key_code, scan_code);
+            self.bindings.insert(key_id, BoundAction::OpenControlCenter);
+            self.bound_count = self.bindings.len();
             self.capture_mode = false;
             return None;
         }

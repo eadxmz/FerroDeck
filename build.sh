@@ -15,9 +15,9 @@ cargo ndk --platform 24 -t arm64-v8a -t armeabi-v7a -o build/apk/lib build --rel
 "$BT/aapt2" compile --dir res -o build/res.zip
 "$BT/aapt2" link -o build/unsigned.apk -I "$JAR" --manifest AndroidManifest.xml \
     -A assets --java build/gen --min-sdk-version 24 --target-sdk-version 34 \
-    --version-code 2 --version-name "0.2.0" build/res.zip
+    --version-code 3 --version-name "0.3.0" build/res.zip
 
-# 3. Compile thin NativeActivity + RemoteFilterService Java bridge
+# 3. Compile thin NativeActivity + LocalAdbHelper + RemoteFilterService Java bridge
 javac -encoding UTF-8 --release 11 -classpath "$JAR" \
     -d build/classes $(find java build/gen -name '*.java')
 "$BT/d8" --release --min-api 24 --lib "$JAR" --output build/dex $(find build/classes -name '*.class')
