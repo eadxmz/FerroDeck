@@ -1,6 +1,4 @@
-//! FerroDeck — Event-driven Rust NativeActivity TV Launcher (`android-activity`).
-//! Sleeps at 0.0% CPU when idle; wakes on raw AInputQueue key/scanCode events,
-//! JNI Home/Voice intents, or minute clock ticks.
+//! FerroDeck — Event-driven Rust NativeActivity TV Launcher (`android-activity` 0.6).
 
 mod clock;
 mod input;
@@ -13,8 +11,8 @@ use crate::input::{
 };
 use crate::ui::{AppTile, LauncherUi};
 use android_activity::input::{InputEvent, KeyAction};
-use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
-use jni::objects::{JClass, JObject, JObjectArray, JString};
+use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
+use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::jint;
 use jni::JNIEnv;
 use ndk::native_window::NativeWindow;
@@ -28,6 +26,8 @@ use tiny_skia::Pixmap;
 struct SharedState {
     ui: LauncherUi,
     mapper: RemoteMapper,
+    waker: Option<AndroidAppWaker>,
+    tz_offset_ms: i64,
     pending_launch_pkg: Option<String>,
     pending_voice_search: bool,
     pending_open_a11y: bool,
@@ -35,10 +35,21 @@ struct SharedState {
     needs_redraw: bool,
 }
 
+impl SharedState {
+    fn request_redraw(&mut self) {
+        self.needs_redraw = true;
+        if let Some(ref waker) = self.waker {
+            waker.wake();
+        }
+    }
+}
+
 static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
     Mutex::new(SharedState {
         ui: LauncherUi::new(None, None, None),
         mapper: RemoteMapper::new(),
+        waker: None,
+        tz_offset_ms: 0,
         pending_launch_pkg: None,
         pending_voice_search: false,
         pending_open_a11y: false,
@@ -73,12 +84,35 @@ fn load_wallpaper_into_ui(app: &AndroidApp, st: &mut SharedState) {
     st.wallpaper_dirty = false;
 }
 
-fn current_hh_mm() -> String {
-    let secs = SystemTime::now()
+/// Queries `java.util.TimeZone.getDefault().getOffset(nowMs)` so the 1:1 clock shows local TV time.
+fn refresh_timezone_offset(app: &AndroidApp) -> Option<i64> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let tz_class = env.find_class("java/util/TimeZone").ok()?;
+    let tz_obj = env
+        .call_static_method(tz_class, "getDefault", "()Ljava/util/TimeZone;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+    let offset = env
+        .call_method(tz_obj, "getOffset", "(J)I", &[JValue::Long(now_ms)])
+        .ok()?
+        .i()
+        .ok()?;
+    Some(offset as i64)
+}
+
+fn format_local_hh_mm(tz_offset_ms: i64) -> String {
+    let utc_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let total_mins = (secs / 60) % (24 * 60);
+        .as_millis() as i64;
+    let local_secs = (utc_ms + tz_offset_ms).div_euclid(1000);
+    let total_mins = local_secs.div_euclid(60).rem_euclid(24 * 60);
     let h = total_mins / 60;
     let m = total_mins % 60;
     format!("{:02}:{:02}", h, m)
@@ -90,6 +124,8 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     if w == 0 || h == 0 {
         return false;
     }
+
+    // Lock buffer geometry to exact 1:1 physical pixels (eliminates surface scaling blur)
     unsafe {
         ndk_sys::ANativeWindow_setBuffersGeometry(
             window.ptr().as_ptr(),
@@ -105,24 +141,28 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     };
 
     let animating = st.ui.tick_animations();
-    let time_str = current_hh_mm();
+    let time_str = format_local_hh_mm(st.tz_offset_ms);
     let key_label = st.mapper.last_captured_label.clone();
     st.ui.render(&mut pixmap, &time_str, &key_label);
 
     if let Ok(mut buf) = window.lock(None) {
-        let stride_px = buf.stride() as usize;
-        let dst_bytes = unsafe {
-            std::slice::from_raw_parts_mut(buf.bits() as *mut u8, stride_px * (h as usize) * 4)
-        };
-        let src_bytes = pixmap.data();
-        let row_bytes = (w as usize) * 4;
-        for y in 0..(h as usize) {
-            let src_off = y * row_bytes;
-            let dst_off = y * stride_px * 4;
-            dst_bytes[dst_off..dst_off + row_bytes]
-                .copy_from_slice(&src_bytes[src_off..src_off + row_bytes]);
+        let stride_px = buf.stride().max(0) as usize;
+        let bits = buf.bits();
+        if !bits.is_null() && stride_px >= w as usize {
+            let dst_bytes = unsafe {
+                std::slice::from_raw_parts_mut(bits as *mut u8, stride_px * (h as usize) * 4)
+            };
+            let src_bytes = pixmap.data();
+            let row_bytes = (w as usize) * 4;
+            for y in 0..(h as usize) {
+                let src_off = y * row_bytes;
+                let dst_off = y * stride_px * 4;
+                dst_bytes[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&src_bytes[src_off..src_off + row_bytes]);
+            }
         }
     }
+
     st.needs_redraw = animating;
     animating
 }
@@ -136,8 +176,7 @@ fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
         return;
     }
 
-    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    if let Ok(vm) = vm {
+    if let Ok(vm) = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) } {
         if let Ok(mut env) = vm.attach_current_thread() {
             let act_obj = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
             if let Some(pkg) = launch_pkg {
@@ -160,6 +199,27 @@ fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
     }
 }
 
+fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
+    match act {
+        BoundAction::OpenSettingsPill => st.ui.settings.toggle(),
+        BoundAction::ToggleClockStyle => {
+            st.ui.clock_style = (st.ui.clock_style + 1) % 3;
+        }
+        BoundAction::CycleWallpaper => {
+            if !st.ui.wallpaper_names.is_empty() {
+                st.ui.wallpaper_idx = (st.ui.wallpaper_idx + 1) % st.ui.wallpaper_names.len();
+                st.wallpaper_dirty = true;
+            }
+        }
+        BoundAction::TriggerVoiceAssist => {
+            st.pending_voice_search = true;
+        }
+        BoundAction::LaunchApp(pkg) => {
+            st.pending_launch_pkg = Some(pkg);
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnHomePressed(
     _env: JNIEnv,
@@ -167,7 +227,7 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnHomePressed(
 ) {
     if let Ok(mut st) = STATE.lock() {
         st.ui.on_home_pressed();
-        st.needs_redraw = true;
+        st.request_redraw();
     }
 }
 
@@ -182,7 +242,7 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnRemoteKey(
         if let Some(act) = st.mapper.on_raw_key(key_code, scan_code) {
             apply_bound_action(&mut st, act);
         }
-        st.needs_redraw = true;
+        st.request_redraw();
     }
 }
 
@@ -193,7 +253,7 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
     packages: JObjectArray,
     labels: JObjectArray,
 ) {
-    let count = env.get_array_length(&packages).unwrap_or(0) as usize;
+    let count = env.get_array_length(&packages).unwrap_or(0).max(0) as usize;
     let palette: [[u8; 3]; 6] = [
         [34, 72, 138],
         [142, 42, 68],
@@ -225,28 +285,74 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
     }
     if let Ok(mut st) = STATE.lock() {
         st.ui.set_apps(tiles);
-        st.needs_redraw = true;
+        st.request_redraw();
     }
 }
 
-fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
-    match act {
-        BoundAction::OpenSettingsPill => st.ui.settings.toggle(),
-        BoundAction::ToggleClockStyle => {
-            st.ui.clock_style = (st.ui.clock_style + 1) % 3;
+fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
+    if let Some(bound) = st.mapper.on_raw_key(kc, sc) {
+        apply_bound_action(st, bound);
+        st.needs_redraw = true;
+        return true;
+    }
+
+    match kc {
+        AKEYCODE_DPAD_LEFT => {
+            st.ui.move_dpad(-1, 0);
+            st.needs_redraw = true;
+            true
         }
-        BoundAction::CycleWallpaper => {
-            if !st.ui.wallpaper_names.is_empty() {
-                st.ui.wallpaper_idx = (st.ui.wallpaper_idx + 1) % st.ui.wallpaper_names.len();
-                st.wallpaper_dirty = true;
+        AKEYCODE_DPAD_RIGHT => {
+            st.ui.move_dpad(1, 0);
+            st.needs_redraw = true;
+            true
+        }
+        AKEYCODE_DPAD_UP => {
+            st.ui.move_dpad(0, -1);
+            st.needs_redraw = true;
+            true
+        }
+        AKEYCODE_DPAD_DOWN => {
+            st.ui.move_dpad(0, 1);
+            st.needs_redraw = true;
+            true
+        }
+        AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
+            if st.ui.settings.open {
+                match st.ui.settings.selected {
+                    3 => {
+                        st.mapper.capture_mode = true;
+                        st.mapper.last_captured_label = "Press button now...".into();
+                    }
+                    4 => {
+                        st.pending_open_a11y = true;
+                    }
+                    _ => {
+                        if st.ui.activate_selected_setting(1) {
+                            st.wallpaper_dirty = true;
+                        }
+                    }
+                }
+            } else if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
+                st.pending_launch_pkg = Some(app_tile.package_name.clone());
             }
+            st.needs_redraw = true;
+            true
         }
-        BoundAction::TriggerVoiceAssist => {
-            st.pending_voice_search = true;
+        AKEYCODE_BACK => {
+            if st.ui.settings.open {
+                st.ui.settings.open = false;
+                st.needs_redraw = true;
+            }
+            // Consume Back on the home screen so the launcher never exits
+            true
         }
-        BoundAction::LaunchApp(pkg) => {
-            st.pending_launch_pkg = Some(pkg);
+        AKEYCODE_HOME => {
+            st.ui.on_home_pressed();
+            st.needs_redraw = true;
+            true
         }
+        _ => false,
     }
 }
 
@@ -255,8 +361,11 @@ pub fn android_main(app: AndroidApp) {
     let big_font = load_asset_bytes(&app, "fonts/Antonio-Light.ttf");
     let bold_font = load_asset_bytes(&app, "fonts/InterDisplay-Bold.ttf");
     let reg_font = load_asset_bytes(&app, "fonts/Inter-Regular.ttf");
+    let tz_offset = refresh_timezone_offset(&app).unwrap_or(0);
 
     if let Ok(mut st) = STATE.lock() {
+        st.waker = Some(app.create_waker());
+        st.tz_offset_ms = tz_offset;
         st.ui = LauncherUi::new(big_font.as_deref(), bold_font.as_deref(), reg_font.as_deref());
         load_wallpaper_into_ui(&app, &mut st);
     }
@@ -268,6 +377,7 @@ pub fn android_main(app: AndroidApp) {
             if st.needs_redraw {
                 Some(Duration::from_millis(16))
             } else {
+                // Sleep at 0.0% CPU until input, waker wake-up, or the next minute boundary
                 let now_secs = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -277,34 +387,41 @@ pub fn android_main(app: AndroidApp) {
             }
         };
 
+        let mut refresh_tz = false;
         app.poll_events(timeout, |event| match event {
             PollEvent::Main(main_ev) => match main_ev {
                 MainEvent::Destroy => running = false,
                 MainEvent::InitWindow { .. }
-                | MainEvent::GainedFocus
                 | MainEvent::WindowResized { .. }
-                | MainEvent::NewIntent => {
+                | MainEvent::RedrawNeeded { .. }
+                | MainEvent::ConfigChanged { .. } => {
                     if let Ok(mut st) = STATE.lock() {
-                        if matches!(main_ev, MainEvent::NewIntent) {
-                            st.ui.on_home_pressed();
-                        }
+                        st.needs_redraw = true;
+                    }
+                }
+                MainEvent::GainedFocus | MainEvent::Resume { .. } => {
+                    refresh_tz = true;
+                    if let Ok(mut st) = STATE.lock() {
                         st.needs_redraw = true;
                     }
                 }
                 _ => {}
             },
-            PollEvent::Timeout => {
-                if let Ok(mut st) = STATE.lock() {
-                    st.needs_redraw = true;
-                }
-            }
-            PollEvent::Wake => {
+            PollEvent::Timeout | PollEvent::Wake => {
                 if let Ok(mut st) = STATE.lock() {
                     st.needs_redraw = true;
                 }
             }
             _ => {}
         });
+
+        if refresh_tz {
+            if let Some(offset) = refresh_timezone_offset(&app) {
+                if let Ok(mut st) = STATE.lock() {
+                    st.tz_offset_ms = offset;
+                }
+            }
+        }
 
         if let Ok(mut iter) = app.input_events_iter() {
             while iter.next(|event| {
@@ -313,70 +430,8 @@ pub fn android_main(app: AndroidApp) {
                         let kc: i32 = ke.key_code().into();
                         let sc: i32 = ke.scan_code();
                         let mut st = STATE.lock().unwrap();
-                        if let Some(bound) = st.mapper.on_raw_key(kc, sc) {
-                            apply_bound_action(&mut st, bound);
-                            st.needs_redraw = true;
+                        if handle_key_down(&mut st, kc, sc) {
                             return InputStatus::Handled;
-                        }
-                        match kc {
-                            AKEYCODE_DPAD_LEFT => {
-                                st.ui.move_dpad(-1, 0);
-                                st.needs_redraw = true;
-                                return InputStatus::Handled;
-                            }
-                            AKEYCODE_DPAD_RIGHT => {
-                                st.ui.move_dpad(1, 0);
-                                st.needs_redraw = true;
-                                return InputStatus::Handled;
-                            }
-                            AKEYCODE_DPAD_UP => {
-                                st.ui.move_dpad(0, -1);
-                                st.needs_redraw = true;
-                                return InputStatus::Handled;
-                            }
-                            AKEYCODE_DPAD_DOWN => {
-                                st.ui.move_dpad(0, 1);
-                                st.needs_redraw = true;
-                                return InputStatus::Handled;
-                            }
-                            AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
-                                if st.ui.settings.open {
-                                    match st.ui.settings.selected {
-                                        3 => {
-                                            st.mapper.capture_mode = true;
-                                            st.mapper.last_captured_label =
-                                                "Press button now...".into();
-                                        }
-                                        4 => {
-                                            st.pending_open_a11y = true;
-                                        }
-                                        _ => {
-                                            if st.ui.activate_selected_setting(1) {
-                                                st.wallpaper_dirty = true;
-                                            }
-                                        }
-                                    }
-                                } else if let Some(app_tile) =
-                                    st.ui.apps.get(st.ui.selected_index)
-                                {
-                                    st.pending_launch_pkg = Some(app_tile.package_name.clone());
-                                }
-                                st.needs_redraw = true;
-                                return InputStatus::Handled;
-                            }
-                            AKEYCODE_BACK => {
-                                if st.ui.settings.open {
-                                    st.ui.settings.open = false;
-                                    st.needs_redraw = true;
-                                }
-                                return InputStatus::Handled;
-                            }
-                            AKEYCODE_HOME => {
-                                st.ui.on_home_pressed();
-                                st.needs_redraw = true;
-                                return InputStatus::Handled;
-                            }
-                            _ => {}
                         }
                     }
                 }

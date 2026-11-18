@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
-ndk = { version = "0.9", features = ["native_window"] }
+ndk = { version = "0.9", features = ["nativewindow"] }
 ndk-sys = "0.6"
 jni = "0.21"
 tiny-skia = "0.11"
