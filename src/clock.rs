@@ -1,7 +1,40 @@
 //! Crisp 1:1 pixel-aligned Glass Clock & Header Text rasterizer using `fontdue`.
 
 use fontdue::{Font, FontSettings};
+use once_cell::sync::Lazy;
 use tiny_skia::{Color, Pixmap, PixmapPaint, PremultipliedColorU8, Transform};
+
+static DEVANAGARI_FONT: Lazy<Option<Font>> = Lazy::new(|| {
+    let paths = [
+        "/system/fonts/NotoSansDevanagari-Regular.ttf",
+        "/system/fonts/NotoSansDevanagari-VF.ttf",
+        "/system/fonts/NotoSansDevanagariUI-Regular.ttf",
+    ];
+    for path in paths {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(f) = Font::from_bytes(
+                bytes,
+                FontSettings {
+                    scale: 32.0,
+                    ..Default::default()
+                },
+            ) {
+                return Some(f);
+            }
+        }
+    }
+    None
+});
+
+#[inline]
+fn pick_glyph_font<'a>(primary: &'a Font, ch: char) -> &'a Font {
+    if ('\u{0900}'..='\u{097F}').contains(&ch) {
+        if let Some(ref dev) = *DEVANAGARI_FONT {
+            return dev;
+        }
+    }
+    primary
+}
 
 pub struct CrispClock {
     font_big: Option<Font>,
@@ -95,7 +128,7 @@ impl CrispClock {
         let mut max_descent: i32 = 0;
 
         for ch in text.chars() {
-            let (metrics, bitmap) = font.rasterize(ch, px);
+            let (metrics, bitmap) = pick_glyph_font(font, ch).rasterize(ch, px);
             let ascent = metrics.height as i32 + metrics.ymin;
             let descent = (-metrics.ymin).max(0);
             if ascent > max_ascent {
@@ -181,7 +214,7 @@ pub fn draw_crisp_label(
     let mut pen_x = x;
 
     for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, px);
+        let (metrics, bitmap) = pick_glyph_font(font, ch).rasterize(ch, px);
         let gx = pen_x + metrics.xmin;
         let gy = baseline_y - (metrics.height as i32 + metrics.ymin);
         for row in 0..metrics.height {
@@ -220,7 +253,7 @@ pub fn measure_label_width(font: Option<&Font>, text: &str, px: f32) -> f32 {
     let Some(font) = font else {
         return text.len() as f32 * px * 0.5;
     };
-    text.chars().map(|ch| font.rasterize(ch, px).0.advance_width).sum()
+    text.chars().map(|ch| pick_glyph_font(font, ch).rasterize(ch, px).0.advance_width).sum()
 }
 
 #[inline]

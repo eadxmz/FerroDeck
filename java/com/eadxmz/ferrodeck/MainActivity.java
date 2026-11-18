@@ -96,13 +96,20 @@ public class MainActivity extends NativeActivity {
         } catch (Throwable ignored) { }
     }
 
+    private long lastVoiceTriggerMs = 0L;
+
     private void handleSpecialIntent(Intent intent) {
         if (intent == null) return;
         String action = intent.getAction();
         if (Intent.ACTION_ASSIST.equals(action)
                 || "android.speech.action.WEB_SEARCH".equals(action)
                 || "android.intent.action.VOICE_COMMAND".equals(action)) {
-            nativeOnRemoteKey(KeyEvent.KEYCODE_VOICE_ASSIST, 0);
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - lastVoiceTriggerMs < 1500L) {
+                return;
+            }
+            lastVoiceTriggerMs = now;
+            triggerVoiceAssistFromRust();
         }
     }
 
@@ -321,10 +328,51 @@ public class MainActivity extends NativeActivity {
     }
 
     public void triggerVoiceAssistFromRust() {
+        lastVoiceTriggerMs = android.os.SystemClock.uptimeMillis();
+        PackageManager pm = getPackageManager();
+        String selfPkg = getPackageName();
+        String[] actions = new String[] {
+            "android.speech.action.VOICE_SEARCH_HANDS_FREE",
+            "android.speech.action.WEB_SEARCH",
+            Intent.ACTION_ASSIST,
+            "android.search.action.GLOBAL_SEARCH",
+            Intent.ACTION_WEB_SEARCH
+        };
+        for (String act : actions) {
+            try {
+                Intent query = new Intent(act);
+                for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
+                    if (ri.activityInfo != null && !selfPkg.equals(ri.activityInfo.packageName)) {
+                        Intent launch = new Intent(act);
+                        launch.setClassName(ri.activityInfo.packageName, ri.activityInfo.name);
+                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(launch);
+                        return;
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+        // Fallback: open Google TV Search / Google App or browser search URL
+        String[] searchPkgs = new String[] {
+            "com.google.android.katniss",
+            "com.google.android.googlequicksearchbox",
+            "com.android.vending"
+        };
+        for (String pkg : searchPkgs) {
+            try {
+                Intent i = pm.getLeanbackLaunchIntentForPackage(pkg);
+                if (i == null) i = pm.getLaunchIntentForPackage(pkg);
+                if (i != null) {
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                    return;
+                }
+            } catch (Throwable ignored) { }
+        }
         try {
-            Intent voice = new Intent("android.speech.action.WEB_SEARCH");
-            voice.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(voice);
+            Intent web = new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com"));
+            web.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(web);
         } catch (Throwable ignored) { }
     }
 
