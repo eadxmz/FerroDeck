@@ -99,7 +99,7 @@ public final class VoiceAssistant {
 
             stopAndDestroyRecognizer();
             isListening = true;
-            showHud(ctx, "Listening…", "Say "Open YouTube", search a video, or ask a question", 0L);
+            showHud(ctx, "Listening…", "Say \"Open YouTube\", search a video, or ask a question", 0L);
             MainActivity.nativeSetVoiceHud(true, "Listening…", "Speak now…");
 
             try {
@@ -400,7 +400,7 @@ public final class VoiceAssistant {
     }
 
     private static String normalizeName(String s) {
-        return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\p{L}]", "");
+        return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\p{L}]", "");
     }
 
     public static String getEffectiveAppName(Context ctx, String pkg) {
@@ -554,7 +554,7 @@ public final class VoiceAssistant {
                 .replace("×", "*")
                 .replace("÷", "/")
                 .trim();
-        if (expr.matches("[0-9.+\-*/()\s]+") && expr.matches(".*[+\-*/].*") && expr.matches(".*[0-9].*")) {
+        if (expr.matches("[0-9.+\\-*/()\\s]+") && expr.matches(".*[+\\-*/].*") && expr.matches(".*[0-9].*")) {
             return expr;
         }
         return null;
@@ -569,7 +569,7 @@ public final class VoiceAssistant {
                 if (!Double.isNaN(val) && !Double.isInfinite(val)) {
                     String formatted = (Math.abs(val - Math.rint(val)) < 1e-9)
                             ? String.valueOf((long) Math.rint(val))
-                            : String.format(Locale.US, "%.4f", val).replaceAll("0+$", "").replaceAll("\.$", "");
+                            : String.format(Locale.US, "%.4f", val).replaceAll("0+$", "").replaceAll("\\.$", "");
                     return "The answer is " + formatted + ".";
                 }
             } catch (Throwable ignored) { }
@@ -577,7 +577,7 @@ public final class VoiceAssistant {
 
         // 2. Clean topic query for background knowledge search
         String topic = rawText
-                .replaceAll("(?i)^(what is|what's|whats|who is|who's|whos|where is|when was|tell me about|define)\s+", "")
+                .replaceAll("(?i)^(what is|what's|whats|who is|who's|whos|where is|when was|tell me about|define)\\s+", "")
                 .replaceAll("[?!.]+$", "")
                 .trim();
         if (topic.isEmpty()) topic = rawText;
@@ -612,7 +612,7 @@ public final class VoiceAssistant {
     }
 
     private static String trimToTwoSentences(String text) {
-        String clean = text.replaceAll("\s+", " ").trim();
+        String clean = text.replaceAll("\\s+", " ").trim();
         int firstEnd = clean.indexOf(". ");
         if (firstEnd > 0) {
             int secondEnd = clean.indexOf(". ", firstEnd + 2);
