@@ -19,12 +19,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Minimal NativeActivity host for FerroDeck.
- * - Extracts 96x96 RGBA app icons and passes them to Rust `tiny_skia` over JNI.
- * - Exits Android Touch Mode on onNewIntent / onWindowFocusChanged so D-pad arrows
- *   work immediately after leaving sideloaded Coji TV Browser without pressing Back first.
- */
 public class MainActivity extends NativeActivity {
     static {
         System.loadLibrary("ferrodeck");
@@ -187,11 +181,17 @@ public class MainActivity extends NativeActivity {
         } catch (Throwable ignored) { }
     }
 
-    public void openAccessibilitySettingsFromRust() {
+    public void openSystemActionFromRust(String action) {
         try {
-            Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            Intent i = new Intent(action != null && !action.isEmpty() ? action : Settings.ACTION_SETTINGS);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(i);
-        } catch (Throwable ignored) { }
+        } catch (Throwable ignored) {
+            try {
+                Intent fallback = new Intent(Settings.ACTION_SETTINGS);
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(fallback);
+            } catch (Throwable ignored2) { }
+        }
     }
 }

@@ -9,8 +9,8 @@ use crate::input::{
     BoundAction, RemoteMapper, AKEYCODE_BACK, AKEYCODE_DPAD_CENTER, AKEYCODE_DPAD_DOWN,
     AKEYCODE_DPAD_LEFT, AKEYCODE_DPAD_RIGHT, AKEYCODE_DPAD_UP, AKEYCODE_ENTER, AKEYCODE_HOME,
 };
-use crate::ui::{AppTile, LauncherUi, SETTINGS_TILE_PKG};
-use android_activity::input::{InputEvent, KeyAction};
+use crate::ui::{AppTile, FocusZone, LauncherUi, UiAction, SETTINGS_TILE_PKG};
+use android_activity::input::{InputEvent, KeyAction, MotionAction};
 use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::jint;
@@ -28,9 +28,10 @@ struct SharedState {
     mapper: RemoteMapper,
     waker: Option<AndroidAppWaker>,
     tz_offset_ms: i64,
+    screen_dims: (f32, f32),
     pending_launch_pkg: Option<String>,
     pending_voice_search: bool,
-    pending_open_a11y: bool,
+    pending_settings_action: Option<&'static str>,
     scene_dirty: bool,
     needs_redraw: bool,
 }
@@ -50,13 +51,33 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         mapper: RemoteMapper::new(),
         waker: None,
         tz_offset_ms: 0,
+        screen_dims: (1920.0, 1080.0),
         pending_launch_pkg: None,
         pending_voice_search: false,
-        pending_open_a11y: false,
+        pending_settings_action: None,
         scene_dirty: true,
         needs_redraw: true,
     })
 });
+
+fn load_asset_or_system_font(app: &AndroidApp, asset_path: &str, sys_paths: &[&str]) -> Option<Vec<u8>> {
+    if let Some(c_path) = CString::new(asset_path).ok() {
+        if let Some(mut asset) = app.asset_manager().open(&c_path) {
+            let mut buf = Vec::new();
+            if asset.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                return Some(buf);
+            }
+        }
+    }
+    for sp in sys_paths {
+        if let Ok(bytes) = std::fs::read(sp) {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
 
 fn load_asset_bytes(app: &AndroidApp, path: &str) -> Option<Vec<u8>> {
     let c_path = CString::new(path).ok()?;
@@ -101,6 +122,8 @@ fn load_scene_into_ui(app: &AndroidApp, st: &mut SharedState) {
             });
             st.ui.set_scene_pixmaps(bw, bh, rgba.into_raw(), fg_data);
         }
+    } else {
+        st.ui.ensure_procedural_scene();
     }
     st.scene_dirty = false;
 }
@@ -150,9 +173,8 @@ fn format_clock_greeting_date(tz_offset_ms: i64, user_name: &str) -> (String, St
     };
     let greeting = format!("{}, {}", greet_prefix, user_name);
 
-    // Civil calendar date from Unix epoch days (Howard Hinnant's algorithm)
     let days = local_secs.div_euclid(86_400);
-    let dow = (days + 4).rem_euclid(7) as usize; // 1970-01-01 was Thursday (4)
+    let dow = (days + 4).rem_euclid(7) as usize;
     let weekdays = [
         "Sunday",
         "Monday",
@@ -196,6 +218,7 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     if w == 0 || h == 0 {
         return false;
     }
+    st.screen_dims = (w as f32, h as f32);
 
     unsafe {
         ndk_sys::ANativeWindow_setBuffersGeometry(
@@ -240,12 +263,22 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     animating
 }
 
+fn queue_ui_action(st: &mut SharedState, act: UiAction) {
+    match act {
+        UiAction::None => {}
+        UiAction::OpenWifiSettings => st.pending_settings_action = Some("android.settings.WIFI_SETTINGS"),
+        UiAction::OpenDisplaySettings => st.pending_settings_action = Some("android.settings.DISPLAY_SETTINGS"),
+        UiAction::OpenAccessibilitySettings => st.pending_settings_action = Some("android.settings.ACCESSIBILITY_SETTINGS"),
+        UiAction::OpenAndroidSettings => st.pending_settings_action = Some("android.settings.SETTINGS"),
+    }
+}
+
 fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
     let launch_pkg = st.pending_launch_pkg.take();
     let do_voice = std::mem::take(&mut st.pending_voice_search);
-    let do_a11y = std::mem::take(&mut st.pending_open_a11y);
+    let settings_act = st.pending_settings_action.take();
 
-    if launch_pkg.is_none() && !do_voice && !do_a11y {
+    if launch_pkg.is_none() && !do_voice && settings_act.is_none() {
         return;
     }
 
@@ -265,8 +298,15 @@ fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
             if do_voice {
                 let _ = env.call_method(&act_obj, "triggerVoiceAssistFromRust", "()V", &[]);
             }
-            if do_a11y {
-                let _ = env.call_method(&act_obj, "openAccessibilitySettingsFromRust", "()V", &[]);
+            if let Some(action_str) = settings_act {
+                if let Ok(j_act) = env.new_string(action_str) {
+                    let _ = env.call_method(
+                        &act_obj,
+                        "openSystemActionFromRust",
+                        "(Ljava/lang/String;)V",
+                        &[(&j_act).into()],
+                    );
+                }
             }
         }
     }
@@ -274,12 +314,16 @@ fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
 
 fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
     match act {
-        BoundAction::OpenSettingsPill => st.ui.settings.toggle(),
+        BoundAction::OpenSettingsPill => {
+            st.ui.weather_popup_open = false;
+            st.ui.settings.toggle();
+        }
         BoundAction::ToggleClockStyle => {
             st.ui.clock_style = (st.ui.clock_style + 1) % 3;
         }
         BoundAction::CycleWallpaper => {
             st.ui.scene_idx = (st.ui.scene_idx + 1) % crate::ui::SCENES.len();
+            st.ui.invalidate_scene_cache();
             st.scene_dirty = true;
         }
         BoundAction::TriggerVoiceAssist => {
@@ -419,25 +463,35 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
         }
         AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
             if st.ui.settings.open {
-                match st.ui.settings.selected {
-                    2 => {
-                        st.mapper.capture_mode = true;
-                        st.mapper.last_captured_label = "Press button now...".into();
+                if st.ui.settings.selected == 4 {
+                    st.mapper.capture_mode = true;
+                    st.mapper.last_captured_label = "Press button now...".into();
+                } else {
+                    let (dirty, act) = st.ui.activate_selected_setting(1);
+                    if dirty {
+                        st.scene_dirty = true;
                     }
-                    3 => {
-                        st.pending_open_a11y = true;
+                    queue_ui_action(st, act);
+                }
+            } else if st.ui.weather_popup_open {
+                st.ui.weather_popup_open = false;
+            } else {
+                match st.ui.focus_zone {
+                    FocusZone::TopWeather => {
+                        st.ui.weather_popup_open = true;
                     }
-                    _ => {
-                        if st.ui.activate_selected_setting(1) {
-                            st.scene_dirty = true;
+                    FocusZone::TopControlCenter => {
+                        st.ui.settings.toggle();
+                    }
+                    FocusZone::Dock => {
+                        if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
+                            if app_tile.package_name == SETTINGS_TILE_PKG {
+                                st.ui.settings.toggle();
+                            } else {
+                                st.pending_launch_pkg = Some(app_tile.package_name.clone());
+                            }
                         }
                     }
-                }
-            } else if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
-                if app_tile.package_name == SETTINGS_TILE_PKG {
-                    st.ui.settings.toggle();
-                } else {
-                    st.pending_launch_pkg = Some(app_tile.package_name.clone());
                 }
             }
             st.needs_redraw = true;
@@ -446,6 +500,12 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
         AKEYCODE_BACK => {
             if st.ui.settings.open {
                 st.ui.settings.open = false;
+                st.needs_redraw = true;
+            } else if st.ui.weather_popup_open {
+                st.ui.weather_popup_open = false;
+                st.needs_redraw = true;
+            } else if st.ui.focus_zone != FocusZone::Dock {
+                st.ui.focus_zone = FocusZone::Dock;
                 st.needs_redraw = true;
             }
             true
@@ -461,10 +521,42 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
 
 #[no_mangle]
 pub fn android_main(app: AndroidApp) {
-    let big_font = load_asset_bytes(&app, "fonts/Antonio-Light.ttf");
-    let bold_font = load_asset_bytes(&app, "fonts/InterDisplay-Bold.ttf");
-    let med_font = load_asset_bytes(&app, "fonts/Inter-Medium.ttf");
-    let reg_font = load_asset_bytes(&app, "fonts/Inter-Regular.ttf");
+    let big_font = load_asset_or_system_font(
+        &app,
+        "fonts/Antonio-Light.ttf",
+        &[
+            "/system/fonts/Roboto-Thin.ttf",
+            "/system/fonts/Roboto-Light.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+        ],
+    );
+    let bold_font = load_asset_or_system_font(
+        &app,
+        "fonts/InterDisplay-Bold.ttf",
+        &[
+            "/system/fonts/Roboto-Bold.ttf",
+            "/system/fonts/Roboto-Medium.ttf",
+            "/system/fonts/DroidSans-Bold.ttf",
+        ],
+    );
+    let med_font = load_asset_or_system_font(
+        &app,
+        "fonts/Inter-Medium.ttf",
+        &[
+            "/system/fonts/Roboto-Medium.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+        ],
+    );
+    let reg_font = load_asset_or_system_font(
+        &app,
+        "fonts/Inter-Regular.ttf",
+        &[
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+        ],
+    );
     let settings_icon = load_asset_bytes(&app, "icons/System Settings.png")
         .as_deref()
         .and_then(decode_png_pixmap);
@@ -537,15 +629,35 @@ pub fn android_main(app: AndroidApp) {
 
         if let Ok(mut iter) = app.input_events_iter() {
             while iter.next(|event| {
-                if let InputEvent::KeyEvent(ke) = event {
-                    if ke.action() == KeyAction::Down {
-                        let kc: i32 = u32::from(ke.key_code()) as i32;
-                        let sc: i32 = ke.scan_code();
-                        let mut st = STATE.lock().unwrap();
-                        if handle_key_down(&mut st, kc, sc) {
-                            return InputStatus::Handled;
+                match event {
+                    InputEvent::KeyEvent(ke) => {
+                        if ke.action() == KeyAction::Down {
+                            let kc: i32 = u32::from(ke.key_code()) as i32;
+                            let sc: i32 = ke.scan_code();
+                            let mut st = STATE.lock().unwrap();
+                            if handle_key_down(&mut st, kc, sc) {
+                                return InputStatus::Handled;
+                            }
                         }
                     }
+                    InputEvent::MotionEvent(me) => {
+                        if me.action() == MotionAction::Up {
+                            if let Some(ptr) = me.pointers().next() {
+                                let x = ptr.x();
+                                let y = ptr.y();
+                                let mut st = STATE.lock().unwrap();
+                                let (sw, sh) = st.screen_dims;
+                                let (pkg, act) = st.ui.handle_tap(x, y, sw, sh);
+                                if let Some(p) = pkg {
+                                    st.pending_launch_pkg = Some(p);
+                                }
+                                queue_ui_action(&mut st, act);
+                                st.needs_redraw = true;
+                                return InputStatus::Handled;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
                 InputStatus::Unhandled
             }) {}
