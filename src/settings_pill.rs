@@ -8,6 +8,7 @@
 //! - Bottom centered pill hint bar ("Up and down to browse, OK to change, Back to close").
 
 use crate::clock::{draw_crisp_label, measure_label_width};
+use crate::glyphs::{draw_glyph, Glyph};
 use fontdue::{Font, FontSettings};
 use tiny_skia::{
     Color, FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern, Pixmap, Rect, SpreadMode,
@@ -315,28 +316,24 @@ impl HomeSettingsScreen {
                 Color::from_rgba8(220, 226, 238, 215)
             };
 
-            // Minimal crisp badge dot/icon on left of sidebar item
-            let dot_x = side_x + 14.0 * unit;
-            let dot_y = ry + pill_h * 0.5 - 4.5 * unit;
-            if let Some(badge) = rounded_rect_path(dot_x, dot_y, 9.0 * unit, 9.0 * unit, 3.0 * unit) {
-                let mut bp = Paint::default();
-                bp.anti_alias = true;
-                bp.set_color(if is_active && !self.in_right_pane {
-                    Color::from_rgba8(32, 36, 48, 220)
-                } else {
-                    Color::from_rgba8(210, 220, 235, 175)
-                });
-                pm.stroke_path(
-                    &badge,
-                    &bp,
-                    &Stroke {
-                        width: (1.1 * unit).max(1.0),
-                        ..Default::default()
-                    },
-                    Transform::identity(),
-                    None,
-                );
-            }
+            // Crisp vector category glyph matching Home settings sidebar
+            let glyph = match cat {
+                SettingsCategory::Appearance => Glyph::Scene,
+                SettingsCategory::Weather => Glyph::Cloud,
+                SettingsCategory::Apps => Glyph::Apps,
+                SettingsCategory::People => Glyph::Person,
+                SettingsCategory::ControlPanel => Glyph::Sliders,
+                SettingsCategory::ButtonMapper => Glyph::Remote,
+                SettingsCategory::QuickSettings => Glyph::Bolt,
+                SettingsCategory::Language => Glyph::Globe,
+                SettingsCategory::Advanced => Glyph::Shield,
+                SettingsCategory::Updates => Glyph::Update,
+                SettingsCategory::About => Glyph::Info,
+            };
+            let g_size = (14.5 * unit).round();
+            let gx = side_x + 12.0 * unit;
+            let gy = ry + (pill_h - g_size) * 0.5;
+            draw_glyph(pm, glyph, gx, gy, g_size, text_col);
 
             draw_crisp_label(
                 pm,

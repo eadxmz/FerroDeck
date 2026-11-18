@@ -8,6 +8,7 @@
 //! 4. Full Two-Pane Home Settings (`HomeSettingsScreen`) including all Advanced ADB options.
 
 use crate::clock::{draw_crisp_label, measure_label_width, CrispClock};
+use crate::glyphs::{draw_glyph, Glyph};
 use crate::settings_pill::{rounded_rect_path, HomeSettingsScreen, SettingRowItem, SettingsCategory};
 use fontdue::{Font, FontSettings};
 use tiny_skia::{
@@ -1424,24 +1425,27 @@ impl LauncherUi {
             65
         };
 
-        let tiles: [(&str, String, [u8; 3]); 8] = [
-            ("Wi-Fi", self.sys.wifi_label.clone(), [42, 148, 255]),
+        let tiles: [(&str, String, Glyph, Option<[u8; 3]>); 8] = [
+            ("Wi-Fi", self.sys.wifi_label.clone(), Glyph::Wifi, Some([24, 152, 255])),
             (
                 "Bluetooth",
                 if self.sys.bt_on { "On".into() } else { "Off".into() },
-                [56, 132, 255],
+                Glyph::Bluetooth,
+                Some([44, 132, 255]),
             ),
             (
                 "Memory",
                 format!("{}% used · Clean", ram_pct),
-                [215, 222, 235],
+                Glyph::Memory,
+                None,
             ),
             (
                 "Do Not Dist...",
                 if self.sys.dnd_on { "On".into() } else { "Off".into() },
-                [168, 130, 255],
+                Glyph::Moon,
+                None,
             ),
-            ("Audio", "TV Speakers".into(), [235, 240, 250]),
+            ("Audio", "TV Speakers".into(), Glyph::Audio, None),
             (
                 "Sleep Timer",
                 if self.sleep_timer_mins == 0 {
@@ -1449,13 +1453,14 @@ impl LauncherUi {
                 } else {
                     format!("{} min", self.sleep_timer_mins)
                 },
-                [235, 240, 250],
+                Glyph::Timer,
+                None,
             ),
-            ("Ambient M...", "Screensaver".into(), [255, 208, 64]),
-            ("Power Off", "Screen Off".into(), [255, 92, 84]),
+            ("Ambient M...", "Screensaver".into(), Glyph::Ambient, Some([255, 212, 59])),
+            ("Power Off", "Screen Off".into(), Glyph::Power, Some([255, 92, 84])),
         ];
 
-        for (i, (title, sub, badge_rgb)) in tiles.iter().enumerate() {
+        for (i, (title, sub, glyph, tint_rgb)) in tiles.iter().enumerate() {
             let r = (i / 2) as f32;
             let c = (i % 2) as f32;
             let x = grid_x + c * (pill_w + col_gap);
@@ -1491,15 +1496,18 @@ impl LauncherUi {
                 );
             }
 
-            // Left icon badge circle
-            let bx = x + 16.0 * unit;
-            let by = y + pill_h * 0.5 - 9.0 * unit;
-            if let Some(bpath) = rounded_rect_path(bx, by, 18.0 * unit, 18.0 * unit, 9.0 * unit) {
-                let mut bp = Paint::default();
-                bp.anti_alias = true;
-                bp.set_color(Color::from_rgba8(badge_rgb[0], badge_rgb[1], badge_rgb[2], 235));
-                pm.fill_path(&bpath, &bp, FillRule::Winding, Transform::identity(), None);
-            }
+            // Left crisp vector glyph (Wi-Fi waves, Bluetooth rune, Memory chip, Moon, etc.)
+            let g_size = (20.0 * unit).round();
+            let gx = x + 15.0 * unit;
+            let gy = y + (pill_h - g_size) * 0.5;
+            let g_col = if let Some(rgb) = tint_rgb {
+                Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
+            } else if focused {
+                Color::from_rgba8(18, 22, 32, 250)
+            } else {
+                Color::from_rgba8(244, 246, 252, 245)
+            };
+            draw_glyph(pm, *glyph, gx, gy, g_size, g_col);
 
             let title_col = if focused {
                 Color::from_rgba8(16, 18, 26, 255)
@@ -1569,9 +1577,9 @@ impl LauncherUi {
         let sq_gap = (12.0 * unit).round();
         let sq_size = ((grid_w - sq_gap * 3.0) / 4.0).round();
         let sq_r = (16.0 * unit).round();
-        let sq_labels = ["IN", "KEY", "SET", "Q"];
+        let sq_glyphs = [Glyph::Input, Glyph::Remote, Glyph::Gear, Glyph::Search];
 
-        for (b, short_lbl) in sq_labels.iter().enumerate() {
+        for (b, glyph) in sq_glyphs.iter().enumerate() {
             let x = grid_x + (b as f32) * (sq_size + sq_gap);
             let focused = self.cc_selected == 8 + b;
             if let Some(sq) = rounded_rect_path(x, sq_y, sq_size, sq_size, sq_r) {
@@ -1603,22 +1611,15 @@ impl LauncherUi {
                 );
             }
 
-            let lpx = (12.0 * unit).round();
-            let lw = measure_label_width(self.font_medium.as_ref(), short_lbl, lpx);
-            draw_crisp_label(
-                pm,
-                self.font_medium.as_ref(),
-                short_lbl,
-                (x + (sq_size - lw) * 0.5) as i32,
-                (sq_y + sq_size * 0.58) as i32,
-                lpx,
-                if focused {
-                    Color::from_rgba8(16, 18, 26, 255)
-                } else {
-                    Color::from_rgba8(245, 247, 252, 245)
-                },
-                false,
-            );
+            let g_size = (24.0 * unit).round();
+            let gx = x + (sq_size - g_size) * 0.5;
+            let gy = sq_y + (sq_size - g_size) * 0.5;
+            let g_col = if focused {
+                Color::from_rgba8(16, 18, 26, 255)
+            } else {
+                Color::from_rgba8(245, 247, 252, 245)
+            };
+            draw_glyph(pm, *glyph, gx, gy, g_size, g_col);
         }
     }
 
@@ -1803,37 +1804,22 @@ impl LauncherUi {
                 st.width = if focused { (2.0 * unit).max(1.5) } else { (1.1 * unit).max(1.0) };
                 pm.stroke_path(&circle, &rim, &st, Transform::identity(), None);
 
-                let mid_x = cx + size * 0.5;
-                let mid_y = cy + size * 0.5;
-                if zone == FocusZone::TopWeather {
-                    if let Some(cloud) = rounded_rect_path(
-                        mid_x - 7.5 * unit,
-                        mid_y - 2.5 * unit,
-                        15.0 * unit,
-                        7.5 * unit,
-                        3.7 * unit,
-                    ) {
-                        let mut wp = Paint::default();
-                        wp.anti_alias = true;
-                        wp.set_color(Color::from_rgba8(244, 246, 252, 240));
-                        pm.fill_path(&cloud, &wp, FillRule::Winding, Transform::identity(), None);
-                    }
+                let g_size = (19.0 * unit).round();
+                let gx = cx + (size - g_size) * 0.5;
+                let gy = cy + (size - g_size) * 0.5;
+                let top_glyph = if zone == FocusZone::TopWeather {
+                    Glyph::Cloud
                 } else {
-                    let mut wp = Paint::default();
-                    wp.anti_alias = true;
-                    wp.set_color(Color::from_rgba8(244, 246, 252, 240));
-                    for row in [-4.0f32, 0.0, 4.0] {
-                        if let Some(bar) = rounded_rect_path(
-                            mid_x - 6.5 * unit,
-                            mid_y + (row - 0.8) * unit,
-                            13.0 * unit,
-                            1.6 * unit,
-                            0.8 * unit,
-                        ) {
-                            pm.fill_path(&bar, &wp, FillRule::Winding, Transform::identity(), None);
-                        }
-                    }
-                }
+                    Glyph::Sliders
+                };
+                draw_glyph(
+                    pm,
+                    top_glyph,
+                    gx,
+                    gy,
+                    g_size,
+                    Color::from_rgba8(244, 246, 252, 245),
+                );
             }
 
             if focused {

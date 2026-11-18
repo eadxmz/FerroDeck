@@ -1,6 +1,7 @@
 //! FerroDeck — Event-driven Rust NativeActivity TV Launcher (`android-activity` 0.6).
 
 mod clock;
+mod glyphs;
 mod input;
 mod settings_pill;
 mod ui;
