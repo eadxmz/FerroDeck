@@ -2466,7 +2466,6 @@ impl LauncherUi {
             }
         }
     }
-}
 
     pub fn open_app_context_menu(&mut self) {
         if self.focus_zone != FocusZone::Dock || self.apps.is_empty() {
@@ -2526,7 +2525,7 @@ impl LauncherUi {
             }) {
                 out.push((
                     yt.package_name.clone(),
-                    format!("Search "{}" in {}", q, yt.label),
+                    format!("Search \"{}\" in {}", q, yt.label),
                     true,
                 ));
             }
@@ -2537,7 +2536,7 @@ impl LauncherUi {
             }) {
                 out.push((
                     br.package_name.clone(),
-                    format!("Search "{}" in {}", q, br.label),
+                    format!("Search \"{}\" in {}", q, br.label),
                     true,
                 ));
             }
@@ -2863,6 +2862,7 @@ impl LauncherUi {
             false,
         );
     }
+}
 
 fn draw_cover_pixmap(dst: &mut Pixmap, src: &Pixmap) {
     let dw = dst.width() as f32;

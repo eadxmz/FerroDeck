@@ -504,7 +504,7 @@ public class MainActivity extends NativeActivity {
                     WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
                     WifiInfo wi = wm != null ? wm.getConnectionInfo() : null;
                     if (wi != null && wi.getSSID() != null) {
-                        String s = wi.getSSID().replace(""", "");
+                        String s = wi.getSSID().replace("\"", "");
                         if (!s.isEmpty() && !"<unknown ssid>".equalsIgnoreCase(s)) {
                             wifiLabel = s;
                         }
