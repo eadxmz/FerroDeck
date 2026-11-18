@@ -10,7 +10,7 @@ JAR="$SDK/platforms/android-34/android.jar"
 mkdir -p build/gen build/classes build/dex build/apk/lib/arm64-v8a build/apk/lib/armeabi-v7a
 
 # 1. Build Rust native libraries (arm64 + armv7)
-cargo ndk -p 24 -t arm64-v8a -t armeabi-v7a -o build/apk/lib build --release
+cargo ndk --platform 24 -t arm64-v8a -t armeabi-v7a -o build/apk/lib build --release
 
 # 2. Compile minimal resources & assets (no XML layouts, no AndroidX/Leanback bloat)
 "$BT/aapt2" compile --dir res -o build/res.zip
