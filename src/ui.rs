@@ -15,6 +15,7 @@ pub const DESIGN_W: f32 = 960.0;
 pub const DESIGN_H: f32 = 540.0;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AppTile {
     pub package_name: String,
     pub label: String,

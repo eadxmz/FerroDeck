@@ -84,7 +84,6 @@ fn load_wallpaper_into_ui(app: &AndroidApp, st: &mut SharedState) {
     st.wallpaper_dirty = false;
 }
 
-/// Queries `java.util.TimeZone.getDefault().getOffset(nowMs)` so the 1:1 clock shows local TV time.
 fn refresh_timezone_offset(app: &AndroidApp) -> Option<i64> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -125,7 +124,6 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
         return false;
     }
 
-    // Lock buffer geometry to exact 1:1 physical pixels (eliminates surface scaling blur)
     unsafe {
         ndk_sys::ANativeWindow_setBuffersGeometry(
             window.ptr().as_ptr(),
@@ -348,7 +346,6 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
                 st.ui.settings.open = false;
                 st.needs_redraw = true;
             }
-            // Consume Back on the home screen so the launcher never exits
             true
         }
         AKEYCODE_HOME => {
@@ -381,7 +378,6 @@ pub fn android_main(app: AndroidApp) {
             if st.needs_redraw {
                 Some(Duration::from_millis(16))
             } else {
-                // Sleep at 0.0% CPU until input, waker wake-up, or the next minute boundary
                 let now_secs = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

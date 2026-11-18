@@ -27,6 +27,7 @@ pub fn pack_key_id(key_code: i32, scan_code: i32) -> u32 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum BoundAction {
     OpenSettingsPill,
     ToggleClockStyle,
