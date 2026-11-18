@@ -264,17 +264,21 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
     ];
     let mut tiles = Vec::with_capacity(count);
     for i in 0..count {
-        let pkg = env
+        let pkg: String = env
             .get_object_array_element(&packages, i as i32)
             .ok()
-            .and_then(|o| env.get_string(&JString::from(o)).ok())
-            .map(|s| s.into())
+            .and_then(|o| {
+                let jstr = JString::from(o);
+                env.get_string(&jstr).ok().map(|s| s.into())
+            })
             .unwrap_or_default();
-        let lbl = env
+        let lbl: String = env
             .get_object_array_element(&labels, i as i32)
             .ok()
-            .and_then(|o| env.get_string(&JString::from(o)).ok())
-            .map(|s| s.into())
+            .and_then(|o| {
+                let jstr = JString::from(o);
+                env.get_string(&jstr).ok().map(|s| s.into())
+            })
             .unwrap_or_default();
         tiles.push(AppTile {
             package_name: pkg,
@@ -427,7 +431,7 @@ pub fn android_main(app: AndroidApp) {
             while iter.next(|event| {
                 if let InputEvent::KeyEvent(ke) = event {
                     if ke.action() == KeyAction::Down {
-                        let kc: i32 = ke.key_code().into();
+                        let kc: i32 = u32::from(ke.key_code()) as i32;
                         let sc: i32 = ke.scan_code();
                         let mut st = STATE.lock().unwrap();
                         if handle_key_down(&mut st, kc, sc) {
