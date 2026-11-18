@@ -157,6 +157,7 @@ impl Default for SystemSnapshot {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SideEffect {
     None,
     OpenWifiSettings,
