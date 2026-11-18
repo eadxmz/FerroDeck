@@ -1,11 +1,4 @@
-//! Full-Screen Two-Pane Home Settings (`image_4f9a6c.jpg`) + Rounded-Pill Menu Renderer.
-//! Features:
-//! - Left sidebar (`Home settings`): 11 rounded-pill categories with solid white active pill
-//!   (`Appearance and scenes`, `Weather and location`, `Apps`, `People`, `Control Panel`,
-//!    `Button mapper`, `Quick settings`, `Language`, `Advanced`, `Updates`, `About`).
-//! - Right content pane: Section headers + stadium-pill option rows (`corner_radius = height / 2`)
-//!   with smooth 60fps highlight interpolation (fixed so `tick()` always converges cleanly!).
-//! - Bottom centered pill hint bar ("Up and down to browse, OK to change, Back to close").
+//! Full-Screen Two-Pane Home Settings with Inline Section Headers (`NATIVE (INDIA)` vs `GLOBAL`).
 
 use crate::clock::{draw_crisp_label, measure_label_width};
 use crate::glyphs::{draw_glyph, Glyph};
@@ -72,15 +65,21 @@ pub struct SettingRowItem {
     pub action_id: &'static str,
 }
 
+pub struct VisibleRowLayout {
+    pub abs_idx: usize,
+    pub header: Option<&'static str>,
+    pub header_y: f32,
+    pub pill_y: f32,
+    pub pill_h: f32,
+}
+
 pub struct HomeSettingsScreen {
     pub open: bool,
     pub category_idx: usize,
     pub row_idx: usize,
     pub in_right_pane: bool,
     pub status_banner: Option<String>,
-    /// Animated Y coordinate in design units (`540p` space) so resolution changes never glitch.
     pub side_pill_y_u: f32,
-    pub row_pill_y_u: f32,
     font_display: Option<Font>,
     font_medium: Option<Font>,
     font_regular: Option<Font>,
@@ -99,7 +98,6 @@ impl HomeSettingsScreen {
             in_right_pane: false,
             status_banner: None,
             side_pill_y_u: -1.0,
-            row_pill_y_u: -1.0,
             font_display: bold_bytes.and_then(|b| {
                 Font::from_bytes(
                     b,
@@ -140,7 +138,6 @@ impl HomeSettingsScreen {
         self.in_right_pane = false;
         self.status_banner = None;
         self.side_pill_y_u = -1.0;
-        self.row_pill_y_u = -1.0;
     }
 
     pub fn current_category(&self) -> SettingsCategory {
@@ -164,7 +161,6 @@ impl HomeSettingsScreen {
                 self.category_idx - 1
             };
             self.row_idx = 0;
-            self.row_pill_y_u = -1.0;
         }
     }
 
@@ -177,7 +173,6 @@ impl HomeSettingsScreen {
             let n = SettingsCategory::ALL.len();
             self.category_idx = (self.category_idx + 1) % n;
             self.row_idx = 0;
-            self.row_pill_y_u = -1.0;
         }
     }
 
@@ -185,7 +180,6 @@ impl HomeSettingsScreen {
         if !self.in_right_pane && row_count > 0 {
             self.in_right_pane = true;
             self.row_idx = self.row_idx.min(row_count - 1);
-            self.row_pill_y_u = -1.0;
         }
     }
 
@@ -195,48 +189,69 @@ impl HomeSettingsScreen {
         }
     }
 
-    /// Advances smooth pill spring animation in design units; returns `true` while still moving
-    /// so `render_window` keeps `needs_redraw = true` until settled.
     pub fn tick(&mut self) -> bool {
         if !self.open {
             return false;
         }
         let target_side_u = 74.0 + (self.category_idx as f32) * 35.0;
-        let mut busy = false;
-
         if self.side_pill_y_u < 0.0 {
             self.side_pill_y_u = target_side_u;
+            false
         } else {
             let d = target_side_u - self.side_pill_y_u;
             if d.abs() > 0.15 {
                 self.side_pill_y_u += d * 0.42;
-                busy = true;
+                true
             } else {
                 self.side_pill_y_u = target_side_u;
+                false
             }
         }
-
-        if self.in_right_pane {
-            let target_row_u = self.compute_row_y_u(self.row_idx);
-            if self.row_pill_y_u < 0.0 {
-                self.row_pill_y_u = target_row_u;
-            } else {
-                let d = target_row_u - self.row_pill_y_u;
-                if d.abs() > 0.15 {
-                    self.row_pill_y_u += d * 0.42;
-                    busy = true;
-                } else {
-                    self.row_pill_y_u = target_row_u;
-                }
-            }
-        }
-
-        busy
     }
 
-    fn compute_row_y_u(&self, idx: usize) -> f32 {
-        // Uniform row stride in right column (with section headers accounted for)
-        96.0 + (idx as f32) * 46.0
+    /// Computes exact vertical layout for visible rows including inline section headers
+    /// (such as `NATIVE (INDIA)` and `GLOBAL` in Language settings).
+    pub fn compute_visible_layout(&self, rows: &[SettingRowItem], unit: f32) -> Vec<VisibleRowLayout> {
+        let max_visible = 7usize;
+        let page_start = if self.row_idx >= max_visible {
+            self.row_idx + 1 - max_visible
+        } else {
+            0
+        };
+        let end = (page_start + max_visible).min(rows.len());
+        let row_h = (38.0 * unit).round();
+        let row_gap = (7.0 * unit).round();
+        let header_h = (22.0 * unit).round();
+
+        let mut cursor_y = (68.0 * unit).round();
+        let mut last_section: Option<&'static str> = None;
+        let mut out = Vec::with_capacity(end.saturating_sub(page_start));
+
+        for abs_i in page_start..end {
+            let item = &rows[abs_i];
+            let mut header = None;
+            let mut header_y = cursor_y;
+            if !item.section.is_empty() && last_section != Some(item.section) {
+                if last_section.is_some() {
+                    cursor_y += (6.0 * unit).round();
+                }
+                header_y = cursor_y + (14.0 * unit).round();
+                header = Some(item.section);
+                cursor_y += header_h;
+                last_section = Some(item.section);
+            }
+
+            let pill_y = cursor_y;
+            out.push(VisibleRowLayout {
+                abs_idx: abs_i,
+                header,
+                header_y,
+                pill_y,
+                pill_h: row_h,
+            });
+            cursor_y += row_h + row_gap;
+        }
+        out
     }
 
     pub fn draw(
@@ -253,7 +268,6 @@ impl HomeSettingsScreen {
         let sh = pm.height() as f32;
         let _ = self.tick();
 
-        // 1. Full-screen blurred scene backdrop + dark frosted scrim (matching image_4f9a6c.jpg)
         if let Some(glass) = glass_bg {
             let sx = sw / glass.width() as f32;
             let sy = sh / glass.height() as f32;
@@ -275,7 +289,7 @@ impl HomeSettingsScreen {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
 
-        // 2. Left Sidebar: "Home settings" + 11 rounded-pill categories
+        // Left Sidebar
         let side_x = (46.0 * unit).round();
         let side_w = (268.0 * unit).round();
         draw_crisp_label(
@@ -293,7 +307,6 @@ impl HomeSettingsScreen {
         let pill_r = pill_h * 0.5;
         let anim_side_y = (self.side_pill_y_u * unit).round();
 
-        // Animated active sidebar stadium pill (solid white when left pane focused, soft glass when right pane focused)
         if let Some(sp) = rounded_rect_path(side_x, anim_side_y, side_w, pill_h, pill_r) {
             let mut fill = Paint::default();
             fill.anti_alias = true;
@@ -316,7 +329,6 @@ impl HomeSettingsScreen {
                 Color::from_rgba8(220, 226, 238, 215)
             };
 
-            // Crisp vector category glyph matching Home settings sidebar
             let glyph = match cat {
                 SettingsCategory::Appearance => Glyph::Scene,
                 SettingsCategory::Weather => Glyph::Cloud,
@@ -347,7 +359,7 @@ impl HomeSettingsScreen {
             );
         }
 
-        // 3. Right Content Column: Section Header + Stadium-Pill Option Rows
+        // Right Content Column
         let main_x = (348.0 * unit).round();
         let main_w = (sw - main_x - 52.0 * unit).round();
         let active_cat = self.current_category();
@@ -363,39 +375,26 @@ impl HomeSettingsScreen {
             false,
         );
 
-        if let Some(first) = rows.first() {
-            if !first.section.is_empty() {
+        let layouts = self.compute_visible_layout(rows, unit);
+        for lay in &layouts {
+            let item = &rows[lay.abs_idx];
+            if let Some(sec_title) = lay.header {
                 draw_crisp_label(
                     pm,
                     self.font_medium.as_ref(),
-                    first.section,
+                    sec_title,
                     (main_x + 14.0 * unit) as i32,
-                    (82.0 * unit) as i32,
+                    lay.header_y as i32,
                     (9.8 * unit).round(),
-                    Color::from_rgba8(175, 186, 206, 195),
+                    Color::from_rgba8(165, 205, 245, 215),
                     false,
                 );
             }
-        }
 
-        // Visible window of up to 8 rows so Advanced / Appearance never overflow vertically
-        let max_visible = 8usize;
-        let page_start = if self.row_idx >= max_visible {
-            self.row_idx + 1 - max_visible
-        } else {
-            0
-        };
-        let visible_rows = &rows[page_start..(page_start + max_visible).min(rows.len())];
-
-        let row_h = (39.0 * unit).round();
-        let row_stride = (46.0 * unit).round();
-        let row_r = row_h * 0.5; // True stadium pill radius!
-        let list_top = (94.0 * unit).round();
-
-        for (vis_i, item) in visible_rows.iter().enumerate() {
-            let abs_i = page_start + vis_i;
-            let ry = list_top + (vis_i as f32) * row_stride;
-            let is_focused = self.in_right_pane && abs_i == self.row_idx;
+            let ry = lay.pill_y;
+            let row_h = lay.pill_h;
+            let row_r = row_h * 0.5;
+            let is_focused = self.in_right_pane && lay.abs_idx == self.row_idx;
 
             if let Some(pill) = rounded_rect_path(main_x, ry, main_w, row_h, row_r) {
                 let mut fill = Paint::default();
@@ -475,7 +474,6 @@ impl HomeSettingsScreen {
                 );
             }
 
-            // Right-aligned value or green checkmark
             if item.checked == Some(true) {
                 draw_crisp_label(
                     pm,
@@ -503,7 +501,6 @@ impl HomeSettingsScreen {
             }
         }
 
-        // 4. Optional status banner above hint bar
         if let Some(ref msg) = self.status_banner {
             let mpx = (10.5 * unit).round();
             let mw = measure_label_width(self.font_medium.as_ref(), msg, mpx);
@@ -529,7 +526,6 @@ impl HomeSettingsScreen {
             );
         }
 
-        // 5. Bottom Centered Hint Pill (matching image_4f9a6c.jpg)
         let hint_text = if self.in_right_pane {
             "Up and down to browse, OK to change, Back to go back"
         } else {

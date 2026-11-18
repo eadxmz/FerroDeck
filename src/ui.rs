@@ -10,6 +10,238 @@
 use crate::clock::{draw_crisp_label, measure_label_width, CrispClock};
 use crate::glyphs::{draw_glyph, Glyph};
 use crate::settings_pill::{rounded_rect_path, HomeSettingsScreen, SettingRowItem, SettingsCategory};
+pub struct LangEntry {
+    pub code: &'static str,
+    pub is_native_india: bool,
+    pub title: &'static str,
+    pub subtitle: &'static str,
+    pub action_id: &'static str,
+}
+
+pub const ALL_LANGUAGES: &[LangEntry] = &[
+    // NATIVE (INDIA) — English kept as native default alongside Indian languages
+    LangEntry {
+        code: "en",
+        is_native_india: true,
+        title: "English",
+        subtitle: "Use FerroDeck in English (Native)",
+        action_id: "set_lang:en",
+    },
+    LangEntry {
+        code: "hi",
+        is_native_india: true,
+        title: "हिन्दी (Hindi)",
+        subtitle: "FerroDeck का उपयोग हिन्दी में करें",
+        action_id: "set_lang:hi",
+    },
+    LangEntry {
+        code: "ta",
+        is_native_india: true,
+        title: "தமிழ் (Tamil)",
+        subtitle: "FerroDeck-ஐ தமிழில் பயன்படுத்தவும்",
+        action_id: "set_lang:ta",
+    },
+    LangEntry {
+        code: "te",
+        is_native_india: true,
+        title: "తెలుగు (Telugu)",
+        subtitle: "FerroDeck ను తెలుగులో ఉపయోగించండి",
+        action_id: "set_lang:te",
+    },
+    LangEntry {
+        code: "bn",
+        is_native_india: true,
+        title: "বাংলা (Bengali)",
+        subtitle: "বাংলায় FerroDeck ব্যবহার করুন",
+        action_id: "set_lang:bn",
+    },
+    LangEntry {
+        code: "mr",
+        is_native_india: true,
+        title: "मराठी (Marathi)",
+        subtitle: "FerroDeck मराठीत वापरा",
+        action_id: "set_lang:mr",
+    },
+    LangEntry {
+        code: "kn",
+        is_native_india: true,
+        title: "ಕನ್ನಡ (Kannada)",
+        subtitle: "FerroDeck ಅನ್ನು ಕನ್ನಡದಲ್ಲಿ ಬಳಸಿ",
+        action_id: "set_lang:kn",
+    },
+    LangEntry {
+        code: "ml",
+        is_native_india: true,
+        title: "മലയാളം (Malayalam)",
+        subtitle: "മലയാളത്തിൽ FerroDeck ഉപയോഗിക്കുക",
+        action_id: "set_lang:ml",
+    },
+    LangEntry {
+        code: "gu",
+        is_native_india: true,
+        title: "ગુજરાતી (Gujarati)",
+        subtitle: "ગુજરાતીમાં FerroDeck નો ઉપયોગ કરો",
+        action_id: "set_lang:gu",
+    },
+    LangEntry {
+        code: "pa",
+        is_native_india: true,
+        title: "ਪੰਜਾਬੀ (Punjabi)",
+        subtitle: "ਪੰਜਾਬੀ ਵਿੱਚ FerroDeck ਵਰਤੋ",
+        action_id: "set_lang:pa",
+    },
+    LangEntry {
+        code: "ur",
+        is_native_india: true,
+        title: "اردو (Urdu)",
+        subtitle: "FerroDeck کو اردو میں استعمال کریں",
+        action_id: "set_lang:ur",
+    },
+    // GLOBAL
+    LangEntry {
+        code: "tr",
+        is_native_india: false,
+        title: "Türkçe",
+        subtitle: "FerroDeck'i Türkçe kullanın",
+        action_id: "set_lang:tr",
+    },
+    LangEntry {
+        code: "es",
+        is_native_india: false,
+        title: "Español",
+        subtitle: "Usar FerroDeck en español",
+        action_id: "set_lang:es",
+    },
+    LangEntry {
+        code: "fr",
+        is_native_india: false,
+        title: "Français",
+        subtitle: "Utiliser FerroDeck en français",
+        action_id: "set_lang:fr",
+    },
+    LangEntry {
+        code: "de",
+        is_native_india: false,
+        title: "Deutsch",
+        subtitle: "FerroDeck auf Deutsch verwenden",
+        action_id: "set_lang:de",
+    },
+    LangEntry {
+        code: "it",
+        is_native_india: false,
+        title: "Italiano",
+        subtitle: "Usa FerroDeck in italiano",
+        action_id: "set_lang:it",
+    },
+    LangEntry {
+        code: "pt",
+        is_native_india: false,
+        title: "Português",
+        subtitle: "Usar o FerroDeck em português",
+        action_id: "set_lang:pt",
+    },
+    LangEntry {
+        code: "ru",
+        is_native_india: false,
+        title: "Русский",
+        subtitle: "Использовать FerroDeck на русском",
+        action_id: "set_lang:ru",
+    },
+    LangEntry {
+        code: "sv",
+        is_native_india: false,
+        title: "Svenska",
+        subtitle: "Använd FerroDeck på svenska",
+        action_id: "set_lang:sv",
+    },
+    LangEntry {
+        code: "ar",
+        is_native_india: false,
+        title: "العربية",
+        subtitle: "استخدم FerroDeck باللغة العربية",
+        action_id: "set_lang:ar",
+    },
+    LangEntry {
+        code: "ja",
+        is_native_india: false,
+        title: "日本語",
+        subtitle: "FerroDeck を日本語で使用する",
+        action_id: "set_lang:ja",
+    },
+    LangEntry {
+        code: "ko",
+        is_native_india: false,
+        title: "한국어",
+        subtitle: "FerroDeck를 한국어로 사용",
+        action_id: "set_lang:ko",
+    },
+    LangEntry {
+        code: "zh",
+        is_native_india: false,
+        title: "中文",
+        subtitle: "使用中文版 FerroDeck",
+        action_id: "set_lang:zh",
+    },
+];
+
+pub fn localized_greeting(lang_code: &str, h24: u32, user_name: &str) -> String {
+    let prefix = match lang_code {
+        "hi" | "mr" => {
+            if h24 < 12 {
+                "सुप्रभात"
+            } else if h24 < 17 {
+                "शुभ दोपहर"
+            } else {
+                "शुभ संध्या"
+            }
+        }
+        "tr" => {
+            if h24 < 12 {
+                "Günaydın"
+            } else if h24 < 17 {
+                "İyi günler"
+            } else {
+                "İyi akşamlar"
+            }
+        }
+        "es" => {
+            if h24 < 12 {
+                "Buenos días"
+            } else if h24 < 19 {
+                "Buenas tardes"
+            } else {
+                "Buenas noches"
+            }
+        }
+        "fr" => {
+            if h24 < 18 {
+                "Bonjour"
+            } else {
+                "Bonsoir"
+            }
+        }
+        "de" => {
+            if h24 < 12 {
+                "Guten Morgen"
+            } else if h24 < 18 {
+                "Guten Tag"
+            } else {
+                "Guten Abend"
+            }
+        }
+        _ => {
+            if h24 < 12 {
+                "Good morning"
+            } else if h24 < 17 {
+                "Good afternoon"
+            } else {
+                "Good evening"
+            }
+        }
+    };
+    format!("{}, {}", prefix, user_name)
+}
+
 use fontdue::{Font, FontSettings};
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder, Pattern,
@@ -203,7 +435,7 @@ pub struct LauncherUi {
     pub keep_alive_enabled: bool,
     pub caffeine_enabled: bool,
     pub auto_updates: bool,
-    pub language_idx: usize,
+    pub lang_code: &'static str,
 
     pub sys: SystemSnapshot,
     wallpaper_pm: Option<Pixmap>,
@@ -265,7 +497,7 @@ impl LauncherUi {
             keep_alive_enabled: true,
             caffeine_enabled: false,
             auto_updates: true,
-            language_idx: 0,
+            lang_code: "en",
             sys: SystemSnapshot::default(),
             wallpaper_pm: None,
             foreground_pm: None,
@@ -620,31 +852,21 @@ impl LauncherUi {
                     action_id: "open_android_settings",
                 },
             ],
-            SettingsCategory::Language => {
-                let langs = [
-                    ("English", "Use FerroDeck in English"),
-                    ("Türkçe", "FerroDeck'i Türkçe kullanın"),
-                    ("Svenska", "Använd FerroDeck på svenska"),
-                    ("हिन्दी (Indian)", "FerroDeck का उपयोग हिन्दी में करें"),
-                ];
-                langs
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, (name, sub))| SettingRowItem {
-                        section: "LANGUAGE",
-                        title: (*name).into(),
-                        subtitle: Some((*sub).into()),
-                        value: String::new(),
-                        checked: Some(self.language_idx == idx),
-                        action_id: match idx {
-                            0 => "lang_0",
-                            1 => "lang_1",
-                            2 => "lang_2",
-                            _ => "lang_3",
-                        },
-                    })
-                    .collect()
-            }
+            SettingsCategory::Language => ALL_LANGUAGES
+                .iter()
+                .map(|lang| SettingRowItem {
+                    section: if lang.is_native_india {
+                        "NATIVE (INDIA)"
+                    } else {
+                        "GLOBAL"
+                    },
+                    title: lang.title.into(),
+                    subtitle: Some(lang.subtitle.into()),
+                    value: String::new(),
+                    checked: Some(self.lang_code == lang.code),
+                    action_id: lang.action_id,
+                })
+                .collect(),
             SettingsCategory::Advanced => vec![
                 SettingRowItem {
                     section: "ADB & SECURITY MODE",
@@ -844,20 +1066,13 @@ impl LauncherUi {
             "capture_key" => (false, SideEffect::None, true),
             "open_home_picker" => (false, SideEffect::OpenDefaultHomePicker, false),
             "open_android_settings" => (false, SideEffect::OpenAndroidSettings, false),
-            "lang_0" => {
-                self.language_idx = 0;
-                (false, SideEffect::None, false)
-            }
-            "lang_1" => {
-                self.language_idx = 1;
-                (false, SideEffect::None, false)
-            }
-            "lang_2" => {
-                self.language_idx = 2;
-                (false, SideEffect::None, false)
-            }
-            "lang_3" => {
-                self.language_idx = 3;
+            id if id.starts_with("set_lang:") => {
+                let code = &id["set_lang:".len()..];
+                if let Some(entry) = ALL_LANGUAGES.iter().find(|l| l.code == code) {
+                    self.lang_code = entry.code;
+                    let group = if entry.is_native_india { "Native · India" } else { "Global" };
+                    self.settings.status_banner = Some(format!("Language: {} ({})", entry.title, group));
+                }
                 (false, SideEffect::None, false)
             }
             "toggle_adb_mode" => {
@@ -1160,20 +1375,17 @@ impl LauncherUi {
                 }
             }
 
-            // Right pane row taps
+            // Right pane row taps (matches inline section headers + pills)
             let main_x = (348.0 * unit).round();
             let main_w = (sw - main_x - 52.0 * unit).round();
-            let row_h = (39.0 * unit).round();
-            let row_stride = (46.0 * unit).round();
-            let list_top = (94.0 * unit).round();
             let rows = self.build_settings_rows("", 0);
+            let layouts = self.settings.compute_visible_layout(&rows, unit);
             if px >= main_x && px <= main_x + main_w {
-                for (i, item) in rows.iter().take(8).enumerate() {
-                    let ry = list_top + (i as f32) * row_stride;
-                    if py >= ry && py <= ry + row_h {
+                for lay in layouts {
+                    if py >= lay.pill_y && py <= lay.pill_y + lay.pill_h {
                         self.settings.in_right_pane = true;
-                        self.settings.row_idx = i;
-                        let (_, eff, _) = self.execute_setting_action(item.action_id);
+                        self.settings.row_idx = lay.abs_idx;
+                        let (_, eff, _) = self.execute_setting_action(rows[lay.abs_idx].action_id);
                         return (None, eff);
                     }
                 }

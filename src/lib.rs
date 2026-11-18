@@ -155,6 +155,7 @@ fn format_clock_greeting_date(
     tz_offset_ms: i64,
     user_name: &str,
     clock_24h: bool,
+    lang_code: &str,
 ) -> (String, String, String) {
     let utc_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -174,14 +175,7 @@ fn format_clock_greeting_date(
         format!("{}:{:02}", h12, m)
     };
 
-    let greet_prefix = if h24 < 12 {
-        "Good morning"
-    } else if h24 < 17 {
-        "Good afternoon"
-    } else {
-        "Good evening"
-    };
-    let greeting = format!("{}, {}", greet_prefix, user_name);
+    let greeting = crate::ui::localized_greeting(lang_code, h24, user_name);
 
     let days = local_secs.div_euclid(86_400);
     let dow = (days + 4).rem_euclid(7) as usize;
@@ -246,7 +240,7 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
 
     let animating = st.ui.tick_animations();
     let (time_str, greeting_str, date_str) =
-        format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name, st.ui.clock_24h);
+        format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name, st.ui.clock_24h, st.ui.lang_code);
     let key_label = st.mapper.last_captured_label.clone();
     let bound_count = st.mapper.bound_count;
     st.ui.render(
