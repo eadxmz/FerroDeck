@@ -9,10 +9,10 @@ use crate::input::{
     BoundAction, RemoteMapper, AKEYCODE_BACK, AKEYCODE_DPAD_CENTER, AKEYCODE_DPAD_DOWN,
     AKEYCODE_DPAD_LEFT, AKEYCODE_DPAD_RIGHT, AKEYCODE_DPAD_UP, AKEYCODE_ENTER, AKEYCODE_HOME,
 };
-use crate::ui::{AppTile, LauncherUi};
+use crate::ui::{AppTile, LauncherUi, SETTINGS_TILE_PKG};
 use android_activity::input::{InputEvent, KeyAction};
 use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
-use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
+use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::jint;
 use jni::JNIEnv;
 use ndk::native_window::NativeWindow;
@@ -21,7 +21,7 @@ use std::ffi::CString;
 use std::io::Read;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tiny_skia::Pixmap;
+use tiny_skia::{IntSize, Pixmap};
 
 struct SharedState {
     ui: LauncherUi,
@@ -31,7 +31,7 @@ struct SharedState {
     pending_launch_pkg: Option<String>,
     pending_voice_search: bool,
     pending_open_a11y: bool,
-    wallpaper_dirty: bool,
+    scene_dirty: bool,
     needs_redraw: bool,
 }
 
@@ -46,14 +46,14 @@ impl SharedState {
 
 static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
     Mutex::new(SharedState {
-        ui: LauncherUi::new(None, None, None),
+        ui: LauncherUi::new(None, None, None, None, None),
         mapper: RemoteMapper::new(),
         waker: None,
         tz_offset_ms: 0,
         pending_launch_pkg: None,
         pending_voice_search: false,
         pending_open_a11y: false,
-        wallpaper_dirty: true,
+        scene_dirty: true,
         needs_redraw: true,
     })
 });
@@ -66,22 +66,43 @@ fn load_asset_bytes(app: &AndroidApp, path: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn load_wallpaper_into_ui(app: &AndroidApp, st: &mut SharedState) {
-    let name = st
-        .ui
-        .wallpaper_names
-        .get(st.ui.wallpaper_idx)
-        .cloned()
-        .unwrap_or_else(|| "tessellated-pavement.jpg".into());
-    let asset_path = format!("backgrounds/{}", name);
-    if let Some(bytes) = load_asset_bytes(app, &asset_path) {
-        if let Ok(img) = image::load_from_memory(&bytes) {
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            st.ui.set_wallpaper_rgba(w, h, rgba.into_raw());
+fn decode_png_pixmap(bytes: &[u8]) -> Option<Pixmap> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let mut raw = img.into_raw();
+    premultiply_rgba(&mut raw);
+    IntSize::from_wh(w, h).and_then(|sz| Pixmap::from_vec(raw, sz))
+}
+
+fn premultiply_rgba(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a < 255 {
+            px[0] = ((px[0] as u32 * a + 127) / 255) as u8;
+            px[1] = ((px[1] as u32 * a + 127) / 255) as u8;
+            px[2] = ((px[2] as u32 * a + 127) / 255) as u8;
         }
     }
-    st.wallpaper_dirty = false;
+}
+
+fn load_scene_into_ui(app: &AndroidApp, st: &mut SharedState) {
+    let spec = st.ui.current_scene();
+    if let Some(bg_bytes) = load_asset_bytes(app, spec.bg_asset) {
+        if let Ok(img) = image::load_from_memory(&bg_bytes) {
+            let rgba = img.to_rgba8();
+            let (bw, bh) = rgba.dimensions();
+            let fg_data = spec.fg_asset.and_then(|fg_path| {
+                let bytes = load_asset_bytes(app, fg_path)?;
+                let fg_img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+                let (fw, fh) = fg_img.dimensions();
+                let mut fraw = fg_img.into_raw();
+                premultiply_rgba(&mut fraw);
+                Some((fw, fh, fraw))
+            });
+            st.ui.set_scene_pixmaps(bw, bh, rgba.into_raw(), fg_data);
+        }
+    }
+    st.scene_dirty = false;
 }
 
 fn refresh_timezone_offset(app: &AndroidApp) -> Option<i64> {
@@ -105,16 +126,68 @@ fn refresh_timezone_offset(app: &AndroidApp) -> Option<i64> {
     Some(offset as i64)
 }
 
-fn format_local_hh_mm(tz_offset_ms: i64) -> String {
+fn format_clock_greeting_date(tz_offset_ms: i64, user_name: &str) -> (String, String, String) {
     let utc_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
     let local_secs = (utc_ms + tz_offset_ms).div_euclid(1000);
     let total_mins = local_secs.div_euclid(60).rem_euclid(24 * 60);
-    let h = total_mins / 60;
-    let m = total_mins % 60;
-    format!("{:02}:{:02}", h, m)
+    let h24 = (total_mins / 60) as u32;
+    let m = (total_mins % 60) as u32;
+    let h12 = match h24 % 12 {
+        0 => 12,
+        v => v,
+    };
+    let time_str = format!("{}:{:02}", h12, m);
+
+    let greet_prefix = if h24 < 12 {
+        "Good morning"
+    } else if h24 < 17 {
+        "Good afternoon"
+    } else {
+        "Good evening"
+    };
+    let greeting = format!("{}, {}", greet_prefix, user_name);
+
+    // Civil calendar date from Unix epoch days (Howard Hinnant's algorithm)
+    let days = local_secs.div_euclid(86_400);
+    let dow = (days + 4).rem_euclid(7) as usize; // 1970-01-01 was Thursday (4)
+    let weekdays = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month_idx = (if mp < 10 { mp + 3 } else { mp - 9 }) as usize;
+    let months = [
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let date_str = format!("{} {} {}", weekdays[dow], day, months[month_idx]);
+
+    (time_str, greeting, date_str)
 }
 
 fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
@@ -139,9 +212,11 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     };
 
     let animating = st.ui.tick_animations();
-    let time_str = format_local_hh_mm(st.tz_offset_ms);
+    let (time_str, greeting_str, date_str) =
+        format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name);
     let key_label = st.mapper.last_captured_label.clone();
-    st.ui.render(&mut pixmap, &time_str, &key_label);
+    st.ui
+        .render(&mut pixmap, &time_str, &greeting_str, &date_str, &key_label);
 
     if let Ok(mut buf) = window.lock(None) {
         let stride_px = buf.stride().max(0) as usize;
@@ -204,10 +279,8 @@ fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
             st.ui.clock_style = (st.ui.clock_style + 1) % 3;
         }
         BoundAction::CycleWallpaper => {
-            if !st.ui.wallpaper_names.is_empty() {
-                st.ui.wallpaper_idx = (st.ui.wallpaper_idx + 1) % st.ui.wallpaper_names.len();
-                st.wallpaper_dirty = true;
-            }
+            st.ui.scene_idx = (st.ui.scene_idx + 1) % crate::ui::SCENES.len();
+            st.scene_dirty = true;
         }
         BoundAction::TriggerVoiceAssist => {
             st.pending_voice_search = true;
@@ -250,8 +323,12 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
     _class: JClass,
     packages: JObjectArray,
     labels: JObjectArray,
+    icons: JObjectArray,
+    icon_size: jint,
 ) {
     let count = env.get_array_length(&packages).unwrap_or(0).max(0) as usize;
+    let sz = icon_size.max(0) as u32;
+    let expected_len = (sz * sz * 4) as usize;
     let palette: [[u8; 3]; 6] = [
         [34, 72, 138],
         [142, 42, 68],
@@ -278,10 +355,31 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
                 env.get_string(&jstr).ok().map(|s| s.into())
             })
             .unwrap_or_default();
+
+        let icon_pm = if sz > 0 {
+            env.get_object_array_element(&icons, i as i32)
+                .ok()
+                .and_then(|o| {
+                    if o.is_null() {
+                        return None;
+                    }
+                    let jarr = JByteArray::from(o);
+                    let mut raw = env.convert_byte_array(&jarr).ok()?;
+                    if raw.len() == expected_len {
+                        premultiply_rgba(&mut raw);
+                        IntSize::from_wh(sz, sz).and_then(|dim| Pixmap::from_vec(raw, dim))
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        };
+
         tiles.push(AppTile {
             package_name: pkg,
             label: lbl,
-            icon: None,
+            icon: icon_pm,
             accent: palette[i % palette.len()],
         });
     }
@@ -322,21 +420,25 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
         AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
             if st.ui.settings.open {
                 match st.ui.settings.selected {
-                    3 => {
+                    2 => {
                         st.mapper.capture_mode = true;
                         st.mapper.last_captured_label = "Press button now...".into();
                     }
-                    4 => {
+                    3 => {
                         st.pending_open_a11y = true;
                     }
                     _ => {
                         if st.ui.activate_selected_setting(1) {
-                            st.wallpaper_dirty = true;
+                            st.scene_dirty = true;
                         }
                     }
                 }
             } else if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
-                st.pending_launch_pkg = Some(app_tile.package_name.clone());
+                if app_tile.package_name == SETTINGS_TILE_PKG {
+                    st.ui.settings.toggle();
+                } else {
+                    st.pending_launch_pkg = Some(app_tile.package_name.clone());
+                }
             }
             st.needs_redraw = true;
             true
@@ -361,14 +463,24 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
 pub fn android_main(app: AndroidApp) {
     let big_font = load_asset_bytes(&app, "fonts/Antonio-Light.ttf");
     let bold_font = load_asset_bytes(&app, "fonts/InterDisplay-Bold.ttf");
+    let med_font = load_asset_bytes(&app, "fonts/Inter-Medium.ttf");
     let reg_font = load_asset_bytes(&app, "fonts/Inter-Regular.ttf");
+    let settings_icon = load_asset_bytes(&app, "icons/System Settings.png")
+        .as_deref()
+        .and_then(decode_png_pixmap);
     let tz_offset = refresh_timezone_offset(&app).unwrap_or(0);
 
     if let Ok(mut st) = STATE.lock() {
         st.waker = Some(app.create_waker());
         st.tz_offset_ms = tz_offset;
-        st.ui = LauncherUi::new(big_font.as_deref(), bold_font.as_deref(), reg_font.as_deref());
-        load_wallpaper_into_ui(&app, &mut st);
+        st.ui = LauncherUi::new(
+            big_font.as_deref(),
+            bold_font.as_deref(),
+            med_font.as_deref(),
+            reg_font.as_deref(),
+            settings_icon,
+        );
+        load_scene_into_ui(&app, &mut st);
     }
 
     let mut running = true;
@@ -440,8 +552,8 @@ pub fn android_main(app: AndroidApp) {
         }
 
         let mut st = STATE.lock().unwrap();
-        if st.wallpaper_dirty {
-            load_wallpaper_into_ui(&app, &mut st);
+        if st.scene_dirty {
+            load_scene_into_ui(&app, &mut st);
         }
         if st.needs_redraw {
             if let Some(win) = app.native_window() {

@@ -1,10 +1,10 @@
-//! Crisp 1:1 pixel-aligned clock rasterizer using `fontdue`.
-//! Eliminates Android TextView/sp bilinear density scaling blur by rendering glyphs
-//! directly into physical framebuffer coordinates and caching the rendered pixmap
-//! until the formatted time string changes.
+//! Crisp 1:1 pixel-aligned Glass Clock & Header Text rasterizer using `fontdue`.
+//! Renders glyphs directly in physical framebuffer pixels with a frosted top-to-bottom
+//! glass gradient fill, crisp white outer rim, and soft depth shadow so text is 100% sharp
+//! at 720p, 1080p, and 4K without Android `sp`/`dp` bilinear scaling blur.
 
 use fontdue::{Font, FontSettings};
-use tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
+use tiny_skia::{Color, Pixmap, PixmapPaint, PremultipliedColorU8, Transform};
 
 pub struct CrispClock {
     font_big: Option<Font>,
@@ -17,10 +17,26 @@ pub struct CrispClock {
 
 impl CrispClock {
     pub fn new(big_font_bytes: Option<&[u8]>, ui_font_bytes: Option<&[u8]>) -> Self {
-        let font_big = big_font_bytes
-            .and_then(|b| Font::from_bytes(b, FontSettings { scale: 120.0, ..Default::default() }).ok());
-        let font_ui = ui_font_bytes
-            .and_then(|b| Font::from_bytes(b, FontSettings { scale: 48.0, ..Default::default() }).ok());
+        let font_big = big_font_bytes.and_then(|b| {
+            Font::from_bytes(
+                b,
+                FontSettings {
+                    scale: 180.0,
+                    ..Default::default()
+                },
+            )
+            .ok()
+        });
+        let font_ui = ui_font_bytes.and_then(|b| {
+            Font::from_bytes(
+                b,
+                FontSettings {
+                    scale: 48.0,
+                    ..Default::default()
+                },
+            )
+            .ok()
+        });
         Self {
             font_big,
             font_ui,
@@ -31,15 +47,33 @@ impl CrispClock {
         }
     }
 
-    /// Renders the clock string onto `target` at integer-snapped physical coordinates `(x, y)`.
-    /// `style`: 0 = Big Glass Clock, 1 = Top-Right Header Clock, 2 = Hidden.
-    pub fn draw(
+    pub fn measure_width(&self, text: &str, style: u8, size_px: f32) -> f32 {
+        let font = if style == 0 {
+            self.font_big.as_ref().or(self.font_ui.as_ref())
+        } else {
+            self.font_ui.as_ref().or(self.font_big.as_ref())
+        };
+        let Some(font) = font else {
+            return text.len() as f32 * size_px * 0.45;
+        };
+        let px = size_px.round().max(12.0);
+        let mut w = 0.0f32;
+        for ch in text.chars() {
+            let (m, _) = font.rasterize(ch, px);
+            w += m.advance_width;
+        }
+        w
+    }
+
+    /// Draws the clock centered horizontally around `center_x` at top `top_y`.
+    /// `style`: 0 = Giant Refractive Glass Clock, 1 = Top-Right Header Clock, 2 = Hidden.
+    pub fn draw_centered(
         &mut self,
         target: &mut Pixmap,
         time_str: &str,
         style: u8,
-        x: i32,
-        y: i32,
+        center_x: f32,
+        top_y: i32,
         size_px: f32,
     ) {
         if style == 2 || time_str.is_empty() {
@@ -59,9 +93,10 @@ impl CrispClock {
         }
 
         if let Some(ref pm) = self.cached_pixmap {
+            let x = (center_x - (pm.width() as f32 * 0.5)).round() as i32;
             target.draw_pixmap(
                 x,
-                y,
+                top_y,
                 pm.as_ref(),
                 &PixmapPaint::default(),
                 Transform::identity(),
@@ -96,7 +131,7 @@ impl CrispClock {
             glyphs.push((metrics, bitmap));
         }
 
-        let pad = 6;
+        let pad = 8;
         let w = (total_w + pad * 2).max(1) as u32;
         let h = (max_ascent + max_descent + pad * 2).max(1) as u32;
         let mut pm = Pixmap::new(w, h)?;
@@ -106,7 +141,13 @@ impl CrispClock {
         for (metrics, bitmap) in glyphs {
             let gx = pen_x + metrics.xmin;
             let gy = baseline - (metrics.height as i32 + metrics.ymin);
+            let gh = metrics.height.max(1) as f32;
+
             for row in 0..metrics.height {
+                // Vertical frosted glass gradient (brighter specular top & bottom rim)
+                let t = (row as f32 / gh).clamp(0.0, 1.0);
+                let rim_boost = if t < 0.14 || t > 0.86 { 1.08 } else { 0.94 };
+
                 for col in 0..metrics.width {
                     let alpha = bitmap[row * metrics.width + col];
                     if alpha == 0 {
@@ -115,24 +156,28 @@ impl CrispClock {
                     let px_x = gx + col as i32;
                     let px_y = gy + row as i32;
                     if px_x >= 0 && px_y >= 0 && (px_x as u32) < w && (px_y as u32) < h {
-                        let shadow_x = px_x + 1;
-                        let shadow_y = px_y + 2;
-                        if (shadow_x as u32) < w && (shadow_y as u32) < h {
-                            let s_idx = (shadow_y as u32 * w + shadow_x as u32) as usize;
-                            let sa = ((alpha as u32 * 90) / 255) as u8;
+                        // Soft elevation drop shadow
+                        let sx = px_x + 2;
+                        let sy = px_y + 3;
+                        if (sx as u32) < w && (sy as u32) < h {
+                            let s_idx = (sy as u32 * w + sx as u32) as usize;
                             if pm.pixels()[s_idx].alpha() == 0 {
+                                let sa = ((alpha as u32 * 72) / 255) as u8;
                                 pm.pixels_mut()[s_idx] =
-                                    Color::from_rgba8(0, 0, 0, sa).premultiply().to_color_u8();
+                                    Color::from_rgba8(8, 10, 18, sa).premultiply().to_color_u8();
                             }
                         }
+
                         let idx = (px_y as u32 * w + px_x as u32) as usize;
-                        let fg_a = if style == 0 {
-                            ((alpha as u32 * 238) / 255) as u8
-                        } else {
-                            alpha
-                        };
+                        let base_alpha = if style == 0 { 222.0 } else { 248.0 };
+                        let fg_a = ((alpha as f32 / 255.0) * base_alpha * rim_boost)
+                            .clamp(0.0, 255.0) as u8;
+                        // Subtle cool lavender-white glass tint matching Night Scenes
+                        let r = (242.0 + t * 13.0).min(255.0) as u8;
+                        let g = (244.0 + t * 8.0).min(255.0) as u8;
+                        let b = 255u8;
                         pm.pixels_mut()[idx] =
-                            Color::from_rgba8(255, 255, 255, fg_a).premultiply().to_color_u8();
+                            Color::from_rgba8(r, g, b, fg_a).premultiply().to_color_u8();
                     }
                 }
             }
@@ -140,4 +185,83 @@ impl CrispClock {
         }
         Some(pm)
     }
+}
+
+/// Helper to draw crisp single-line UI text (greetings, dates, tooltips) at exact pixel coordinates.
+pub fn draw_crisp_label(
+    pm: &mut Pixmap,
+    font: Option<&Font>,
+    text: &str,
+    x: i32,
+    baseline_y: i32,
+    px: f32,
+    color: Color,
+    with_shadow: bool,
+) {
+    let Some(font) = font else { return };
+    if text.is_empty() {
+        return;
+    }
+    let w = pm.width() as i32;
+    let h = pm.height() as i32;
+    let rgba = color.to_color_u8();
+    let mut pen_x = x;
+
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, px);
+        let gx = pen_x + metrics.xmin;
+        let gy = baseline_y - (metrics.height as i32 + metrics.ymin);
+        for row in 0..metrics.height {
+            for col in 0..metrics.width {
+                let a = bitmap[row * metrics.width + col];
+                if a == 0 {
+                    continue;
+                }
+                let px_x = gx + col as i32;
+                let px_y = gy + row as i32;
+                if px_x >= 0 && px_y >= 0 && px_x < w && px_y < h {
+                    if with_shadow {
+                        let sx = px_x + 1;
+                        let sy = px_y + 1;
+                        if sx < w && sy < h {
+                            let s_idx = (sy * w + sx) as usize;
+                            let sa = ((a as u32 * 110) / 255) as u8;
+                            let sh = Color::from_rgba8(0, 0, 0, sa).premultiply().to_color_u8();
+                            pm.pixels_mut()[s_idx] = blend_over(pm.pixels()[s_idx], sh);
+                        }
+                    }
+                    let out_a = ((a as u32 * rgba.alpha() as u32) / 255) as u8;
+                    let src = Color::from_rgba8(rgba.red(), rgba.green(), rgba.blue(), out_a)
+                        .premultiply()
+                        .to_color_u8();
+                    let idx = (px_y * w + px_x) as usize;
+                    pm.pixels_mut()[idx] = blend_over(pm.pixels()[idx], src);
+                }
+            }
+        }
+        pen_x += metrics.advance_width.round() as i32;
+    }
+}
+
+pub fn measure_label_width(font: Option<&Font>, text: &str, px: f32) -> f32 {
+    let Some(font) = font else {
+        return text.len() as f32 * px * 0.5;
+    };
+    text.chars().map(|ch| font.rasterize(ch, px).0.advance_width).sum()
+}
+
+#[inline]
+pub fn blend_over(dst: PremultipliedColorU8, src: PremultipliedColorU8) -> PremultipliedColorU8 {
+    let inv_a = 255 - src.alpha() as u32;
+    let r = src.red() as u32 + ((dst.red() as u32 * inv_a) / 255);
+    let g = src.green() as u32 + ((dst.green() as u32 * inv_a) / 255);
+    let b = src.blue() as u32 + ((dst.blue() as u32 * inv_a) / 255);
+    let a = src.alpha() as u32 + ((dst.alpha() as u32 * inv_a) / 255);
+    PremultipliedColorU8::from_rgba(
+        r.min(255) as u8,
+        g.min(255) as u8,
+        b.min(255) as u8,
+        a.min(255) as u8,
+    )
+    .unwrap_or(src)
 }

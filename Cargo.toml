@@ -1,6 +1,6 @@
 [package]
 name = "ferrodeck"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Ultra-lightweight Liquid Glass Android TV launcher in Rust"
 

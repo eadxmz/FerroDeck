@@ -4,11 +4,15 @@ import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.View;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -17,8 +21,9 @@ import java.util.Map;
 
 /**
  * Minimal NativeActivity host for FerroDeck.
- * Fixes the Koji Browser Home-button D-Pad focus lock by clearing Android Touch Mode
- * and resetting native Rust focus state immediately on onNewIntent / onWindowFocusChanged.
+ * - Extracts 96x96 RGBA app icons and passes them to Rust `tiny_skia` over JNI.
+ * - Exits Android Touch Mode on onNewIntent / onWindowFocusChanged so D-pad arrows
+ *   work immediately after leaving sideloaded Coji TV Browser without pressing Back first.
  */
 public class MainActivity extends NativeActivity {
     static {
@@ -27,7 +32,7 @@ public class MainActivity extends NativeActivity {
 
     public static native void nativeOnHomePressed();
     public static native void nativeOnRemoteKey(int keyCode, int scanCode);
-    public static native void nativeSetApps(String[] packages, String[] labels);
+    public static native void nativeSetApps(String[] packages, String[] labels, byte[][] icons, int iconSize);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -97,9 +102,25 @@ public class MainActivity extends NativeActivity {
         return super.dispatchKeyEvent(event);
     }
 
+    private static byte[] drawableToRgba(Drawable d, int size) {
+        if (d == null) return null;
+        try {
+            Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+            Canvas c = new Canvas(bmp);
+            d.setBounds(0, 0, size, size);
+            d.draw(c);
+            ByteBuffer buf = ByteBuffer.allocate(size * size * 4);
+            bmp.copyPixelsToBuffer(buf);
+            bmp.recycle();
+            return buf.array();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     public void refreshInstalledApps() {
         PackageManager pm = getPackageManager();
-        Map<String, String> found = new LinkedHashMap<>();
+        Map<String, ResolveInfo> found = new LinkedHashMap<>();
 
         Intent leanback = new Intent(Intent.ACTION_MAIN);
         leanback.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
@@ -107,7 +128,7 @@ public class MainActivity extends NativeActivity {
             if (ri.activityInfo == null) continue;
             String pkg = ri.activityInfo.packageName;
             if (!getPackageName().equals(pkg)) {
-                found.put(pkg, ri.loadLabel(pm).toString());
+                found.put(pkg, ri);
             }
         }
 
@@ -117,20 +138,32 @@ public class MainActivity extends NativeActivity {
             if (ri.activityInfo == null) continue;
             String pkg = ri.activityInfo.packageName;
             if (!getPackageName().equals(pkg) && !found.containsKey(pkg)) {
-                found.put(pkg, ri.loadLabel(pm).toString());
+                found.put(pkg, ri);
             }
         }
 
-        List<Map.Entry<String, String>> entries = new ArrayList<>(found.entrySet());
-        Collections.sort(entries, (a, b) -> a.getValue().compareToIgnoreCase(b.getValue()));
+        List<Map.Entry<String, ResolveInfo>> entries = new ArrayList<>(found.entrySet());
+        Collections.sort(entries, (a, b) -> a.getValue().loadLabel(pm).toString()
+                .compareToIgnoreCase(b.getValue().loadLabel(pm).toString()));
 
+        final int iconSize = 96;
         String[] pkgs = new String[entries.size()];
         String[] lbls = new String[entries.size()];
+        byte[][] icons = new byte[entries.size()][];
         for (int i = 0; i < entries.size(); i++) {
-            pkgs[i] = entries.get(i).getKey();
-            lbls[i] = entries.get(i).getValue();
+            String pkg = entries.get(i).getKey();
+            ResolveInfo ri = entries.get(i).getValue();
+            pkgs[i] = pkg;
+            lbls[i] = ri.loadLabel(pm).toString();
+            Drawable iconDrw = null;
+            try {
+                iconDrw = pm.getApplicationIcon(pkg);
+            } catch (Throwable ignored) {
+                iconDrw = ri.loadIcon(pm);
+            }
+            icons[i] = drawableToRgba(iconDrw, iconSize);
         }
-        nativeSetApps(pkgs, lbls);
+        nativeSetApps(pkgs, lbls, icons, iconSize);
     }
 
     public void launchPackageFromRust(String pkg) {
