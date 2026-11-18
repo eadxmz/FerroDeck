@@ -356,6 +356,7 @@ pub struct AppTile {
     pub label: String,
     pub icon: Option<Pixmap>,
     pub accent: [u8; 3],
+    pub is_builtin: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -389,8 +390,8 @@ impl Default for SystemSnapshot {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SideEffect {
     None,
     OpenWifiSettings,
@@ -401,7 +402,7 @@ pub enum SideEffect {
     OpenAccessibilitySettings,
     OpenAndroidSettings,
     OpenDefaultHomePicker,
-    TriggerVoiceSearch,
+    TriggerVoiceAssistant,
     LockScreenNow,
     CleanMemoryNow,
     RunAdbPairAndGrant,
@@ -410,19 +411,45 @@ pub enum SideEffect {
     SetKeepScreenOn(bool),
 }
 
+#[derive(Clone, Debug)]
+pub struct AppContextMenu {
+    pub open: bool,
+    pub app_idx: usize,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchOverlayState {
+    pub open: bool,
+    pub query: String,
+    pub focus_row: usize, // 0 = keyboard row, 1 = results row
+    pub key_idx: usize,
+    pub result_idx: usize,
+}
+
+pub const SEARCH_KEYS: &[&str] = &[
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+    "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "SPACE", "DEL", "MIC",
+];
+
 pub struct LauncherUi {
     pub apps: Vec<AppTile>,
+    pub hidden_apps: Vec<(String, String)>,
     pub focus_zone: FocusZone,
     pub selected_index: usize,
     pub page_offset: usize,
 
-    // Overlays matching screenshots
+    // Overlays
     pub control_center_open: bool,
-    pub cc_selected: usize, // 0..8 = 8 stadium pills (2x4), 8..12 = 4 bottom squircles
+    pub cc_selected: usize,
     pub recent_apps_open: bool,
     pub recent_selected: usize,
     pub ambient_mode_open: bool,
     pub weather_popup_open: bool,
+    pub app_menu: AppContextMenu,
+    pub search_ui: SearchOverlayState,
+    pub voice_hud: Option<(String, String)>,
     pub settings: HomeSettingsScreen,
 
     // Launcher preferences
@@ -478,6 +505,7 @@ impl LauncherUi {
         });
         Self {
             apps: Vec::new(),
+            hidden_apps: Vec::new(),
             focus_zone: FocusZone::Dock,
             selected_index: 0,
             page_offset: 0,
@@ -487,6 +515,19 @@ impl LauncherUi {
             recent_selected: 0,
             ambient_mode_open: false,
             weather_popup_open: false,
+            app_menu: AppContextMenu {
+                open: false,
+                app_idx: 0,
+                selected: 0,
+            },
+            search_ui: SearchOverlayState {
+                open: false,
+                query: String::new(),
+                focus_row: 0,
+                key_idx: 0,
+                result_idx: 0,
+            },
+            voice_hud: None,
             settings: HomeSettingsScreen::new(bold_font, med_font, reg_font),
             classic_look: false,
             clock_style: 0,
@@ -520,6 +561,7 @@ impl LauncherUi {
             label: "Home settings".into(),
             icon: self.settings_icon_pm.clone(),
             accent: [48, 54, 68],
+            is_builtin: true,
         });
         self.focus_scales = vec![1.0; apps.len()];
         if !self.focus_scales.is_empty() {
@@ -645,6 +687,8 @@ impl LauncherUi {
         self.recent_apps_open = false;
         self.ambient_mode_open = false;
         self.weather_popup_open = false;
+        self.app_menu.open = false;
+        self.search_ui.open = false;
         self.focus_zone = FocusZone::Dock;
         if self.selected_index >= self.apps.len() {
             self.selected_index = 0;
@@ -726,32 +770,43 @@ impl LauncherUi {
                     action_id: "open_weather_card",
                 },
             ],
-            SettingsCategory::Apps => vec![
-                SettingRowItem {
-                    section: "INSTALLED APPS",
-                    title: "Installed TV & sideloaded apps".into(),
-                    subtitle: Some("Includes Leanback & standard launcher apps".into()),
-                    value: format!("{} apps", self.apps.len().saturating_sub(1)),
-                    checked: None,
-                    action_id: "noop",
-                },
-                SettingRowItem {
-                    section: "INSTALLED APPS",
-                    title: "Coji TV Browser Home-focus lock fix".into(),
-                    subtitle: Some("Clears Touch Mode immediately when pressing Home".into()),
-                    value: "Active".into(),
-                    checked: None,
-                    action_id: "noop",
-                },
-                SettingRowItem {
-                    section: "INSTALLED APPS",
-                    title: "Open Recent Apps Switcher".into(),
-                    subtitle: Some("View running apps and free RAM".into()),
-                    value: "Open ›".into(),
-                    checked: None,
-                    action_id: "open_recents",
-                },
-            ],
+            SettingsCategory::Apps => {
+                let mut list = vec![
+                    SettingRowItem {
+                        section: "DOCK & APPS",
+                        title: "Long-press OK on any dock app".into(),
+                        subtitle: Some("Rename (recognized by Voice Assistant), Move, Hide, or App Details".into()),
+                        value: format!("{} visible", self.apps.len().saturating_sub(1)),
+                        checked: None,
+                        action_id: "noop",
+                    },
+                    SettingRowItem {
+                        section: "DOCK & APPS",
+                        title: "Open Recent Apps Switcher".into(),
+                        subtitle: Some("View running apps and free RAM".into()),
+                        value: "Open ›".into(),
+                        checked: None,
+                        action_id: "open_recents",
+                    },
+                ];
+                for (i, (pkg, lbl)) in self.hidden_apps.iter().enumerate() {
+                    list.push(SettingRowItem {
+                        section: "HIDDEN APPS (OK TO UNHIDE)",
+                        title: format!("Unhide {}", lbl),
+                        subtitle: Some(pkg.clone()),
+                        value: "Restore ›".into(),
+                        checked: None,
+                        action_id: match i {
+                            0 => "unhide:0",
+                            1 => "unhide:1",
+                            2 => "unhide:2",
+                            3 => "unhide:3",
+                            _ => "unhide:4",
+                        },
+                    });
+                }
+                list
+            }
             SettingsCategory::People => vec![
                 SettingRowItem {
                     section: "PROFILE",
@@ -802,9 +857,17 @@ impl LauncherUi {
             ],
             SettingsCategory::ButtonMapper => vec![
                 SettingRowItem {
+                    section: "VOICE ASSISTANT KEYBIND",
+                    title: "Set Voice Assistant button…".into(),
+                    subtitle: Some("Press OK, then press the remote button you want for Voice Assistant".into()),
+                    value: last_key_label.into(),
+                    checked: None,
+                    action_id: "capture_voice_key",
+                },
+                SettingRowItem {
                     section: "ACCESSIBILITY SERVICE",
-                    title: "Button Mapper accessibility service".into(),
-                    subtitle: Some("Captures yellow mic & OEM scanCodes across all apps".into()),
+                    title: "Button Mapper & Voice accessibility service".into(),
+                    subtitle: Some("Enables Voice Assistant & in-app search over YouTube, Browser & all apps".into()),
                     value: if self.sys.a11y_enabled {
                         "Active".into()
                     } else {
@@ -814,20 +877,12 @@ impl LauncherUi {
                     action_id: "open_a11y",
                 },
                 SettingRowItem {
-                    section: "CUSTOM BUTTONS",
-                    title: "+ Add New Button to Remap…".into(),
-                    subtitle: Some("Press OK, then press any remote button (including yellow mic)".into()),
-                    value: last_key_label.into(),
-                    checked: None,
-                    action_id: "capture_key",
-                },
-                SettingRowItem {
-                    section: "CUSTOM BUTTONS",
-                    title: "Active button bindings".into(),
-                    subtitle: Some("Menu, Settings, Yellow Mic, Voice Assist & custom scanCodes".into()),
+                    section: "CONTROL CENTER KEYBIND",
+                    title: "Bind button to Control Center…".into(),
+                    subtitle: Some("Press OK, then press any remote button to open Control Center".into()),
                     value: format!("{} mapped", bound_count),
                     checked: None,
-                    action_id: "noop",
+                    action_id: "capture_cc_key",
                 },
             ],
             SettingsCategory::QuickSettings => vec![
@@ -1116,6 +1171,41 @@ impl LauncherUi {
     }
 
     pub fn move_dpad(&mut self, dx: isize, dy: isize, row_count: usize) {
+        if self.app_menu.open {
+            let n = self.app_menu_items().len();
+            if dy < 0 {
+                self.app_menu.selected = if self.app_menu.selected == 0 {
+                    n - 1
+                } else {
+                    self.app_menu.selected - 1
+                };
+            } else if dy > 0 {
+                self.app_menu.selected = (self.app_menu.selected + 1) % n;
+            }
+            return;
+        }
+
+        if self.search_ui.open {
+            let res_len = self.search_matching_apps().len().min(7);
+            if dy > 0 && self.search_ui.focus_row == 0 && res_len > 0 {
+                self.search_ui.focus_row = 1;
+                self.search_ui.result_idx = 0;
+            } else if dy < 0 && self.search_ui.focus_row == 1 {
+                if self.search_ui.result_idx > 0 {
+                    self.search_ui.result_idx -= 1;
+                } else {
+                    self.search_ui.focus_row = 0;
+                }
+            } else if dy > 0 && self.search_ui.focus_row == 1 && res_len > 0 {
+                self.search_ui.result_idx = (self.search_ui.result_idx + 1) % res_len;
+            } else if dx != 0 && self.search_ui.focus_row == 0 {
+                let klen = SEARCH_KEYS.len() as isize;
+                self.search_ui.key_idx =
+                    (self.search_ui.key_idx as isize + dx).rem_euclid(klen) as usize;
+            }
+            return;
+        }
+
         if self.ambient_mode_open {
             if dx != 0 {
                 self.scene_idx =
@@ -1293,9 +1383,14 @@ impl LauncherUi {
                 (SideEffect::RefreshSystemSnapshot, false)
             }
             11 => {
-                // Search squircle
+                // Native Search Overlay (apps, YouTube/Browser search, or ask a question)
                 self.control_center_open = false;
-                (SideEffect::TriggerVoiceSearch, false)
+                self.search_ui.open = true;
+                self.search_ui.query.clear();
+                self.search_ui.focus_row = 0;
+                self.search_ui.key_idx = 0;
+                self.search_ui.result_idx = 0;
+                (SideEffect::None, false)
             }
             _ => (SideEffect::None, false),
         }
@@ -1316,6 +1411,62 @@ impl LauncherUi {
 
         if self.recent_apps_open {
             self.recent_apps_open = false;
+            return (None, SideEffect::None);
+        }
+
+        if self.search_ui.open {
+            let margin = (48.0 * unit).round();
+            let box_w = sw - margin * 2.0;
+            let key_y = (94.0 * unit).round();
+            let key_h = (30.0 * unit).round();
+            let key_gap = (4.0 * unit).round();
+            let total_keys = SEARCH_KEYS.len();
+            let visible_keys = 22usize;
+            let k_start = if self.search_ui.key_idx >= visible_keys {
+                self.search_ui.key_idx + 1 - visible_keys
+            } else {
+                0
+            };
+            if py >= key_y && py <= key_y + key_h {
+                let mut kx = margin;
+                for idx in k_start..(k_start + visible_keys).min(total_keys) {
+                    let lbl = SEARCH_KEYS[idx];
+                    let kw = if lbl.len() > 1 { (44.0 * unit).round() } else { (30.0 * unit).round() };
+                    if px >= kx && px <= kx + kw {
+                        self.search_ui.focus_row = 0;
+                        self.search_ui.key_idx = idx;
+                        match lbl {
+                            "SPACE" => self.search_ui.query.push(' '),
+                            "DEL" => { self.search_ui.query.pop(); }
+                            "MIC" => return (None, SideEffect::TriggerVoiceAssistant),
+                            ch => self.search_ui.query.push_str(&ch.to_lowercase()),
+                        }
+                        return (None, SideEffect::None);
+                    }
+                    kx += kw + key_gap;
+                }
+            }
+            let results = self.search_matching_apps();
+            let res_top = (146.0 * unit).round();
+            let row_h = (38.0 * unit).round();
+            let row_gap = (8.0 * unit).round();
+            if px >= margin && px <= margin + box_w {
+                for (i, (pkg, _lbl, is_action)) in results.iter().take(7).enumerate() {
+                    let ry = res_top + (i as f32) * (row_h + row_gap);
+                    if py >= ry && py <= ry + row_h {
+                        self.search_ui.focus_row = 1;
+                        self.search_ui.result_idx = i;
+                        if !*is_action {
+                            self.search_ui.open = false;
+                            return (Some(pkg.clone()), SideEffect::None);
+                        }
+                        break;
+                    }
+                }
+            }
+            if py < (30.0 * unit) {
+                self.search_ui.open = false;
+            }
             return (None, SideEffect::None);
         }
 
@@ -1587,12 +1738,25 @@ impl LauncherUi {
             self.draw_recent_apps(pm, sw, sh, unit);
         }
 
-        // 10. Full Two-Pane Home Settings Screen (image_4f9a6c.jpg)
+        // 10. Full Two-Pane Home Settings Screen
         if self.settings.open {
             let rows = self.build_settings_rows(last_key_label, bound_count);
             self.settings
                 .draw(pm, self.glass_backdrop_pm.as_ref(), unit, &rows);
         }
+
+        // 11. App Long-Press Context Menu
+        if self.app_menu.open {
+            self.draw_app_context_menu(pm, sw, sh, unit);
+        }
+
+        // 12. Native In-Launcher Search Overlay
+        if self.search_ui.open {
+            self.draw_search_overlay(pm, sw, sh, unit);
+        }
+
+        // 13. Inbuilt Voice Assistant HUD pill
+        self.draw_voice_hud_banner(pm, sw, unit);
     }
 
     /// Renders the exact Control Center layout shown in `image_4f8f03.jpg`:
@@ -2303,6 +2467,402 @@ impl LauncherUi {
         }
     }
 }
+
+    pub fn open_app_context_menu(&mut self) {
+        if self.focus_zone != FocusZone::Dock || self.apps.is_empty() {
+            return;
+        }
+        if let Some(tile) = self.apps.get(self.selected_index) {
+            if tile.package_name == SETTINGS_TILE_PKG {
+                return;
+            }
+            self.app_menu = AppContextMenu {
+                open: true,
+                app_idx: self.selected_index,
+                selected: 0,
+            };
+        }
+    }
+
+    pub fn app_menu_items(&self) -> [&'static str; 7] {
+        let is_builtin = self
+            .apps
+            .get(self.app_menu.app_idx)
+            .map(|a| a.is_builtin)
+            .unwrap_or(false);
+        [
+            "Open",
+            "Rename",
+            "Move Left",
+            "Move Right",
+            "Hide App",
+            "App Details",
+            if is_builtin { "Disable" } else { "Uninstall" },
+        ]
+    }
+
+    pub fn search_matching_apps(&self) -> Vec<(String, String, bool)> {
+        // Returns (package_name, display_label, is_web_action)
+        let q = self.search_ui.query.trim();
+        let q_low = q.to_lowercase();
+        let mut out = Vec::new();
+        for app in &self.apps {
+            if app.package_name == SETTINGS_TILE_PKG {
+                continue;
+            }
+            if q_low.is_empty()
+                || app.label.to_lowercase().contains(&q_low)
+                || app.package_name.to_lowercase().contains(&q_low)
+            {
+                out.push((app.package_name.clone(), app.label.clone(), false));
+            }
+        }
+        if !q.is_empty() {
+            // Find YouTube / TizenTube / SmartTube package if installed
+            if let Some(yt) = self.apps.iter().find(|a| {
+                let l = a.label.to_lowercase();
+                let p = a.package_name.to_lowercase();
+                l.contains("youtube") || p.contains("youtube") || p.contains("tizentube") || p.contains("smarttube")
+            }) {
+                out.push((
+                    yt.package_name.clone(),
+                    format!("Search "{}" in {}", q, yt.label),
+                    true,
+                ));
+            }
+            if let Some(br) = self.apps.iter().find(|a| {
+                let l = a.label.to_lowercase();
+                let p = a.package_name.to_lowercase();
+                l.contains("koji") || l.contains("browser") || p.contains("koji") || p.contains("browser") || p.contains("chrome")
+            }) {
+                out.push((
+                    br.package_name.clone(),
+                    format!("Search "{}" in {}", q, br.label),
+                    true,
+                ));
+            }
+        }
+        out
+    }
+
+    fn draw_app_context_menu(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32) {
+        let Some(app) = self.apps.get(self.app_menu.app_idx) else {
+            return;
+        };
+        let mut scrim = Paint::default();
+        scrim.set_color(Color::from_rgba8(6, 8, 14, 175));
+        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        }
+
+        let items = self.app_menu_items();
+        let panel_w = (360.0 * unit).round();
+        let row_h = (36.0 * unit).round();
+        let row_gap = (7.0 * unit).round();
+        let header_h = (56.0 * unit).round();
+        let pad = (18.0 * unit).round();
+        let panel_h = pad * 2.0 + header_h + (items.len() as f32) * (row_h + row_gap);
+        let px = ((sw - panel_w) * 0.5).round();
+        let py = ((sh - panel_h) * 0.5).round();
+
+        if let Some(card) = rounded_rect_path(px, py, panel_w, panel_h, 24.0 * unit) {
+            let mut bg = Paint::default();
+            bg.anti_alias = true;
+            bg.set_color(Color::from_rgba8(20, 24, 34, 244));
+            pm.fill_path(&card, &bg, FillRule::Winding, Transform::identity(), None);
+
+            let mut rim = Paint::default();
+            rim.anti_alias = true;
+            rim.set_color(Color::from_rgba8(255, 255, 255, 76));
+            pm.stroke_path(
+                &card,
+                &rim,
+                &Stroke {
+                    width: 1.2,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+
+        draw_crisp_label(
+            pm,
+            self.font_medium.as_ref(),
+            &app.label,
+            (px + pad + 8.0 * unit) as i32,
+            (py + pad + 20.0 * unit) as i32,
+            (15.5 * unit).round(),
+            Color::from_rgba8(255, 255, 255, 250),
+            false,
+        );
+        draw_crisp_label(
+            pm,
+            self.font_regular.as_ref(),
+            &app.package_name,
+            (px + pad + 8.0 * unit) as i32,
+            (py + pad + 37.0 * unit) as i32,
+            (9.8 * unit).round(),
+            Color::from_rgba8(165, 180, 204, 200),
+            false,
+        );
+
+        let list_y = py + pad + header_h;
+        let pill_w = panel_w - pad * 2.0;
+        let pill_r = row_h * 0.5;
+        for (i, label) in items.iter().enumerate() {
+            let ry = list_y + (i as f32) * (row_h + row_gap);
+            let focused = i == self.app_menu.selected;
+            if let Some(pill) = rounded_rect_path(px + pad, ry, pill_w, row_h, pill_r) {
+                let mut fill = Paint::default();
+                fill.anti_alias = true;
+                fill.set_color(if focused {
+                    Color::from_rgba8(245, 247, 250, 250)
+                } else {
+                    Color::from_rgba8(255, 255, 255, 20)
+                });
+                pm.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
+            }
+            let col = if focused {
+                Color::from_rgba8(16, 18, 26, 255)
+            } else if *label == "Uninstall" {
+                Color::from_rgba8(255, 118, 112, 240)
+            } else if *label == "Disable" {
+                Color::from_rgba8(255, 198, 92, 245)
+            } else {
+                Color::from_rgba8(242, 246, 252, 240)
+            };
+            draw_crisp_label(
+                pm,
+                self.font_medium.as_ref(),
+                label,
+                (px + pad + 18.0 * unit) as i32,
+                (ry + row_h * 0.65) as i32,
+                (12.2 * unit).round(),
+                col,
+                false,
+            );
+        }
+    }
+
+    fn draw_search_overlay(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32) {
+        if let Some(ref glass) = self.glass_backdrop_pm {
+            let sx = sw / glass.width() as f32;
+            let sy = sh / glass.height() as f32;
+            let mut gp = Paint::default();
+            gp.shader = Pattern::new(
+                glass.as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Bilinear,
+                1.0,
+                Transform::from_scale(sx, sy),
+            );
+            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+                pm.fill_rect(r, &gp, Transform::identity(), None);
+            }
+        }
+        let mut scrim = Paint::default();
+        scrim.set_color(Color::from_rgba8(10, 12, 18, 218));
+        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        }
+
+        let margin = (48.0 * unit).round();
+        let box_w = sw - margin * 2.0;
+        let box_h = (42.0 * unit).round();
+        let box_y = (34.0 * unit).round();
+
+        // Search input stadium pill
+        if let Some(bar) = rounded_rect_path(margin, box_y, box_w, box_h, box_h * 0.5) {
+            let mut fill = Paint::default();
+            fill.anti_alias = true;
+            fill.set_color(Color::from_rgba8(28, 32, 44, 235));
+            pm.fill_path(&bar, &fill, FillRule::Winding, Transform::identity(), None);
+
+            let mut rim = Paint::default();
+            rim.anti_alias = true;
+            rim.set_color(Color::from_rgba8(255, 255, 255, 95));
+            pm.stroke_path(
+                &bar,
+                &rim,
+                &Stroke {
+                    width: 1.3,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+
+        let g_sz = (18.0 * unit).round();
+        draw_glyph(
+            pm,
+            Glyph::Search,
+            margin + 16.0 * unit,
+            box_y + (box_h - g_sz) * 0.5,
+            g_sz,
+            Color::from_rgba8(185, 200, 224, 230),
+        );
+
+        let display_q = if self.search_ui.query.is_empty() {
+            "Search apps, YouTube, or select MIC to speak…"
+        } else {
+            &self.search_ui.query
+        };
+        let q_col = if self.search_ui.query.is_empty() {
+            Color::from_rgba8(160, 172, 195, 195)
+        } else {
+            Color::from_rgba8(255, 255, 255, 250)
+        };
+        draw_crisp_label(
+            pm,
+            self.font_medium.as_ref(),
+            display_q,
+            (margin + 44.0 * unit) as i32,
+            (box_y + box_h * 0.65) as i32,
+            (14.5 * unit).round(),
+            q_col,
+            false,
+        );
+
+        // One-row tvOS keyboard
+        let key_y = (94.0 * unit).round();
+        let key_h = (30.0 * unit).round();
+        let key_gap = (4.0 * unit).round();
+        let total_keys = SEARCH_KEYS.len();
+        let visible_keys = 22usize;
+        let k_start = if self.search_ui.key_idx >= visible_keys {
+            self.search_ui.key_idx + 1 - visible_keys
+        } else {
+            0
+        };
+        let mut kx = margin;
+        for idx in k_start..(k_start + visible_keys).min(total_keys) {
+            let lbl = SEARCH_KEYS[idx];
+            let kw = if lbl.len() > 1 {
+                (44.0 * unit).round()
+            } else {
+                (30.0 * unit).round()
+            };
+            let focused = self.search_ui.focus_row == 0 && idx == self.search_ui.key_idx;
+            if let Some(kp) = rounded_rect_path(kx, key_y, kw, key_h, key_h * 0.5) {
+                let mut fill = Paint::default();
+                fill.anti_alias = true;
+                fill.set_color(if focused {
+                    Color::from_rgba8(245, 247, 250, 250)
+                } else if lbl == "MIC" {
+                    Color::from_rgba8(42, 132, 255, 190)
+                } else {
+                    Color::from_rgba8(255, 255, 255, 24)
+                });
+                pm.fill_path(&kp, &fill, FillRule::Winding, Transform::identity(), None);
+            }
+            let fpx = (11.0 * unit).round();
+            let tw = measure_label_width(self.font_medium.as_ref(), lbl, fpx);
+            draw_crisp_label(
+                pm,
+                self.font_medium.as_ref(),
+                lbl,
+                (kx + (kw - tw) * 0.5) as i32,
+                (key_y + key_h * 0.67) as i32,
+                fpx,
+                if focused {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else {
+                    Color::from_rgba8(245, 247, 252, 245)
+                },
+                false,
+            );
+            kx += kw + key_gap;
+            if kx > sw - margin - 30.0 * unit {
+                break;
+            }
+        }
+
+        // Results list (stadium pills)
+        let results = self.search_matching_apps();
+        let res_top = (146.0 * unit).round();
+        let row_h = (38.0 * unit).round();
+        let row_gap = (8.0 * unit).round();
+        for (i, (_pkg, label, is_action)) in results.iter().take(7).enumerate() {
+            let ry = res_top + (i as f32) * (row_h + row_gap);
+            let focused = self.search_ui.focus_row == 1 && i == self.search_ui.result_idx;
+            if let Some(rp) = rounded_rect_path(margin, ry, box_w, row_h, row_h * 0.5) {
+                let mut fill = Paint::default();
+                fill.anti_alias = true;
+                fill.set_color(if focused {
+                    Color::from_rgba8(245, 247, 250, 250)
+                } else if *is_action {
+                    Color::from_rgba8(42, 132, 255, 42)
+                } else {
+                    Color::from_rgba8(255, 255, 255, 18)
+                });
+                pm.fill_path(&rp, &fill, FillRule::Winding, Transform::identity(), None);
+            }
+            draw_crisp_label(
+                pm,
+                self.font_medium.as_ref(),
+                label,
+                (margin + 18.0 * unit) as i32,
+                (ry + row_h * 0.65) as i32,
+                (12.5 * unit).round(),
+                if focused {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else {
+                    Color::from_rgba8(244, 247, 252, 245)
+                },
+                false,
+            );
+        }
+    }
+
+    fn draw_voice_hud_banner(&self, pm: &mut Pixmap, sw: f32, unit: f32) {
+        let Some((ref title, ref sub)) = self.voice_hud else {
+            return;
+        };
+        let text = if sub.is_empty() {
+            title.clone()
+        } else {
+            format!("{}  ·  {}", title, sub)
+        };
+        let fpx = (12.0 * unit).round();
+        let tw = measure_label_width(self.font_medium.as_ref(), &text, fpx);
+        let pill_w = (tw + 36.0 * unit).min(sw - 60.0 * unit).round();
+        let pill_h = (32.0 * unit).round();
+        let px = ((sw - pill_w) * 0.5).round();
+        let py = (20.0 * unit).round();
+
+        if let Some(pill) = rounded_rect_path(px, py, pill_w, pill_h, pill_h * 0.5) {
+            let mut bg = Paint::default();
+            bg.anti_alias = true;
+            bg.set_color(Color::from_rgba8(18, 24, 38, 242));
+            pm.fill_path(&pill, &bg, FillRule::Winding, Transform::identity(), None);
+
+            let mut rim = Paint::default();
+            rim.anti_alias = true;
+            rim.set_color(Color::from_rgba8(72, 168, 255, 220));
+            pm.stroke_path(
+                &pill,
+                &rim,
+                &Stroke {
+                    width: 1.5,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+        draw_crisp_label(
+            pm,
+            self.font_medium.as_ref(),
+            &text,
+            (px + 18.0 * unit) as i32,
+            (py + pill_h * 0.66) as i32,
+            fpx,
+            Color::from_rgba8(255, 255, 255, 250),
+            false,
+        );
+    }
 
 fn draw_cover_pixmap(dst: &mut Pixmap, src: &Pixmap) {
     let dw = dst.width() as f32;

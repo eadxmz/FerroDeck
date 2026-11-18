@@ -7,14 +7,17 @@ mod settings_pill;
 mod ui;
 
 use crate::input::{
-    BoundAction, RemoteMapper, AKEYCODE_BACK, AKEYCODE_DPAD_CENTER, AKEYCODE_DPAD_DOWN,
-    AKEYCODE_DPAD_LEFT, AKEYCODE_DPAD_RIGHT, AKEYCODE_DPAD_UP, AKEYCODE_ENTER, AKEYCODE_HOME,
+    BoundAction, CaptureTarget, RemoteMapper, AKEYCODE_BACK, AKEYCODE_DEL, AKEYCODE_DPAD_CENTER,
+    AKEYCODE_DPAD_DOWN, AKEYCODE_DPAD_LEFT, AKEYCODE_DPAD_RIGHT, AKEYCODE_DPAD_UP, AKEYCODE_ENTER,
+    AKEYCODE_HOME,
 };
 use crate::settings_pill::SettingsCategory;
-use crate::ui::{AppTile, FocusZone, LauncherUi, SideEffect, SETTINGS_TILE_PKG};
+use crate::ui::{
+    AppTile, FocusZone, LauncherUi, SideEffect, SEARCH_KEYS, SETTINGS_TILE_PKG,
+};
 use android_activity::input::{InputEvent, KeyAction, MotionAction};
 use android_activity::{AndroidApp, AndroidAppWaker, InputStatus, MainEvent, PollEvent};
-use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue};
+use jni::objects::{JBooleanArray, JByteArray, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{jboolean, jint};
 use jni::JNIEnv;
 use ndk::native_window::NativeWindow;
@@ -22,8 +25,26 @@ use once_cell::sync::Lazy;
 use std::ffi::CString;
 use std::io::Read;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_skia::{IntSize, Pixmap};
+
+#[allow(dead_code)]
+enum PendingJavaCall {
+    None,
+    LaunchPkg(String),
+    KillPkg(String),
+    RenameApp(String, String),
+    SetAppHidden(String, bool),
+    SaveDockOrder(String),
+    SaveVoiceKeybind(i32, i32),
+    SetKeyCaptureFlag(bool),
+    OpenAppDetails(String),
+    UninstallApp(String),
+    DisableApp(String),
+    StartVoiceAssistant,
+    SearchInPackage(String, String),
+    Effect(SideEffect),
+}
 
 struct SharedState {
     ui: LauncherUi,
@@ -31,9 +52,9 @@ struct SharedState {
     waker: Option<AndroidAppWaker>,
     tz_offset_ms: i64,
     screen_dims: (f32, f32),
-    pending_launch_pkg: Option<String>,
-    pending_kill_pkg: Option<String>,
-    pending_effect: SideEffect,
+    ok_pressed_at: Option<Instant>,
+    ok_long_fired: bool,
+    pending_calls: Vec<PendingJavaCall>,
     scene_dirty: bool,
     needs_redraw: bool,
 }
@@ -54,9 +75,9 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         waker: None,
         tz_offset_ms: 0,
         screen_dims: (1920.0, 1080.0),
-        pending_launch_pkg: None,
-        pending_kill_pkg: None,
-        pending_effect: SideEffect::None,
+        ok_pressed_at: None,
+        ok_long_fired: false,
+        pending_calls: Vec::new(),
         scene_dirty: true,
         needs_redraw: true,
     })
@@ -241,7 +262,7 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     let animating = st.ui.tick_animations();
     let (time_str, greeting_str, date_str) =
         format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name, st.ui.clock_24h, st.ui.lang_code);
-    let key_label = st.mapper.last_captured_label.clone();
+    let key_label = st.mapper.voice_key_label.clone();
     let bound_count = st.mapper.bound_count;
     st.ui.render(
         &mut pixmap,
@@ -274,95 +295,156 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     animating
 }
 
-fn dispatch_java_side_effects(app: &AndroidApp, st: &mut SharedState) {
-    let launch_pkg = st.pending_launch_pkg.take();
-    let kill_pkg = st.pending_kill_pkg.take();
-    let effect = std::mem::replace(&mut st.pending_effect, SideEffect::None);
-    let secure_mode = st.ui.sys.adb_mode_secure;
-
-    if launch_pkg.is_none() && kill_pkg.is_none() && effect == SideEffect::None {
+fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
+    if st.pending_calls.is_empty() {
         return;
     }
+    let calls: Vec<PendingJavaCall> = st.pending_calls.drain(..).collect();
+    let secure_mode = st.ui.sys.adb_mode_secure;
 
     if let Ok(vm) = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) } {
         if let Ok(mut env) = vm.attach_current_thread() {
             let act_obj = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-            if let Some(pkg) = launch_pkg {
-                if let Ok(j_pkg) = env.new_string(&pkg) {
-                    let _ = env.call_method(
-                        &act_obj,
-                        "launchPackageFromRust",
-                        "(Ljava/lang/String;)V",
-                        &[(&j_pkg).into()],
-                    );
-                }
-            }
-            if let Some(kpkg) = kill_pkg {
-                if let Ok(j_pkg) = env.new_string(&kpkg) {
-                    let _ = env.call_method(
-                        &act_obj,
-                        "killBackgroundPackageFromRust",
-                        "(Ljava/lang/String;)V",
-                        &[(&j_pkg).into()],
-                    );
-                }
-            }
-            match effect {
-                SideEffect::None => {}
-                SideEffect::OpenWifiSettings => {
-                    let _ = env.call_method(&act_obj, "openWifiSettingsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenBluetoothSettings => {
-                    let _ = env.call_method(&act_obj, "openBluetoothSettingsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenSoundSettings => {
-                    let _ = env.call_method(&act_obj, "openSoundSettingsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenDisplaySettings => {
-                    let _ = env.call_method(&act_obj, "openDisplaySettingsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenInputsOrTvSettings => {
-                    let _ = env.call_method(&act_obj, "openInputsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenAccessibilitySettings => {
-                    let _ = env.call_method(&act_obj, "openAccessibilitySettingsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenAndroidSettings => {
-                    let _ = env.call_method(&act_obj, "openAndroidSettingsFromRust", "()V", &[]);
-                }
-                SideEffect::OpenDefaultHomePicker => {
-                    let _ = env.call_method(&act_obj, "openHomePickerFromRust", "()V", &[]);
-                }
-                SideEffect::TriggerVoiceSearch => {
-                    let _ = env.call_method(&act_obj, "triggerVoiceAssistFromRust", "()V", &[]);
-                }
-                SideEffect::LockScreenNow => {
-                    let _ = env.call_method(&act_obj, "lockScreenFromRust", "()V", &[]);
-                }
-                SideEffect::CleanMemoryNow => {
-                    let _ = env.call_method(&act_obj, "cleanMemoryFromRust", "()V", &[]);
-                }
-                SideEffect::RunAdbPairAndGrant => {
-                    let _ = env.call_method(
-                        &act_obj,
-                        "runLocalAdbPairFromRust",
-                        "(Z)V",
-                        &[JValue::Bool(if secure_mode { 1 } else { 0 })],
-                    );
-                }
-                SideEffect::ToggleAdbPort => {
-                    let _ = env.call_method(&act_obj, "toggleAdbPortFromRust", "()V", &[]);
-                }
-                SideEffect::RefreshSystemSnapshot => {
-                    let _ = env.call_method(&act_obj, "refreshSystemSnapshot", "()V", &[]);
-                }
-                SideEffect::SetKeepScreenOn(on) => {
-                    let _ = env.call_method(
-                        &act_obj,
-                        "setKeepScreenOnFromRust",
-                        "(Z)V",
-                        &[JValue::Bool(if on { 1 } else { 0 })],
-                    );
+            for call in calls {
+                match call {
+                    PendingJavaCall::None => {}
+                    PendingJavaCall::LaunchPkg(pkg) => {
+                        if let Ok(jp) = env.new_string(&pkg) {
+                            let _ = env.call_method(&act_obj, "launchPackageFromRust", "(Ljava/lang/String;)V", &[(&jp).into()]);
+                        }
+                    }
+                    PendingJavaCall::KillPkg(pkg) => {
+                        if let Ok(jp) = env.new_string(&pkg) {
+                            let _ = env.call_method(&act_obj, "killBackgroundPackageFromRust", "(Ljava/lang/String;)V", &[(&jp).into()]);
+                        }
+                    }
+                    PendingJavaCall::RenameApp(pkg, cur) => {
+                        if let (Ok(jp), Ok(jc)) = (env.new_string(&pkg), env.new_string(&cur)) {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "promptRenameAppFromRust",
+                                "(Ljava/lang/String;Ljava/lang/String;)V",
+                                &[(&jp).into(), (&jc).into()],
+                            );
+                        }
+                    }
+                    PendingJavaCall::SetAppHidden(pkg, hidden) => {
+                        if let Ok(jp) = env.new_string(&pkg) {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "setAppHiddenFromRust",
+                                "(Ljava/lang/String;Z)V",
+                                &[(&jp).into(), JValue::Bool(if hidden { 1 } else { 0 })],
+                            );
+                        }
+                    }
+                    PendingJavaCall::SaveDockOrder(csv) => {
+                        if let Ok(jc) = env.new_string(&csv) {
+                            let _ = env.call_method(&act_obj, "saveDockOrderFromRust", "(Ljava/lang/String;)V", &[(&jc).into()]);
+                        }
+                    }
+                    PendingJavaCall::SaveVoiceKeybind(kc, sc) => {
+                        let _ = env.call_method(
+                            &act_obj,
+                            "saveVoiceKeybindFromRust",
+                            "(II)V",
+                            &[JValue::Int(kc), JValue::Int(sc)],
+                        );
+                    }
+                    PendingJavaCall::SetKeyCaptureFlag(active) => {
+                        let _ = env.call_method(
+                            &act_obj,
+                            "setKeyCaptureFlagFromRust",
+                            "(Z)V",
+                            &[JValue::Bool(if active { 1 } else { 0 })],
+                        );
+                    }
+                    PendingJavaCall::OpenAppDetails(pkg) => {
+                        if let Ok(jp) = env.new_string(&pkg) {
+                            let _ = env.call_method(&act_obj, "openAppDetailsFromRust", "(Ljava/lang/String;)V", &[(&jp).into()]);
+                        }
+                    }
+                    PendingJavaCall::UninstallApp(pkg) => {
+                        if let Ok(jp) = env.new_string(&pkg) {
+                            let _ = env.call_method(&act_obj, "uninstallAppFromRust", "(Ljava/lang/String;)V", &[(&jp).into()]);
+                        }
+                    }
+                    PendingJavaCall::DisableApp(pkg) => {
+                        if let Ok(jp) = env.new_string(&pkg) {
+                            let _ = env.call_method(&act_obj, "disableAppFromRust", "(Ljava/lang/String;)V", &[(&jp).into()]);
+                        }
+                    }
+                    PendingJavaCall::StartVoiceAssistant => {
+                        let _ = env.call_method(&act_obj, "startVoiceAssistantFromRust", "()V", &[]);
+                    }
+                    PendingJavaCall::SearchInPackage(pkg, q) => {
+                        if let (Ok(jp), Ok(jq)) = (env.new_string(&pkg), env.new_string(&q)) {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "searchInPackageFromRust",
+                                "(Ljava/lang/String;Ljava/lang/String;)V",
+                                &[(&jp).into(), (&jq).into()],
+                            );
+                        }
+                    }
+                    PendingJavaCall::Effect(eff) => match eff {
+                        SideEffect::None => {}
+                        SideEffect::OpenWifiSettings => {
+                            let _ = env.call_method(&act_obj, "openWifiSettingsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenBluetoothSettings => {
+                            let _ = env.call_method(&act_obj, "openBluetoothSettingsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenSoundSettings => {
+                            let _ = env.call_method(&act_obj, "openSoundSettingsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenDisplaySettings => {
+                            let _ = env.call_method(&act_obj, "openDisplaySettingsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenInputsOrTvSettings => {
+                            let _ = env.call_method(&act_obj, "openInputsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenAccessibilitySettings => {
+                            let _ = env.call_method(&act_obj, "openAccessibilitySettingsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenAndroidSettings => {
+                            let _ = env.call_method(&act_obj, "openAndroidSettingsFromRust", "()V", &[]);
+                        }
+                        SideEffect::OpenDefaultHomePicker => {
+                            let _ = env.call_method(&act_obj, "openHomePickerFromRust", "()V", &[]);
+                        }
+                        SideEffect::TriggerVoiceAssistant => {
+                            let _ = env.call_method(&act_obj, "startVoiceAssistantFromRust", "()V", &[]);
+                        }
+                        SideEffect::LockScreenNow => {
+                            let _ = env.call_method(&act_obj, "lockScreenFromRust", "()V", &[]);
+                        }
+                        SideEffect::CleanMemoryNow => {
+                            let _ = env.call_method(&act_obj, "cleanMemoryFromRust", "()V", &[]);
+                        }
+                        SideEffect::RunAdbPairAndGrant => {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "runLocalAdbPairFromRust",
+                                "(Z)V",
+                                &[JValue::Bool(if secure_mode { 1 } else { 0 })],
+                            );
+                        }
+                        SideEffect::ToggleAdbPort => {
+                            let _ = env.call_method(&act_obj, "toggleAdbPortFromRust", "()V", &[]);
+                        }
+                        SideEffect::RefreshSystemSnapshot => {
+                            let _ = env.call_method(&act_obj, "refreshSystemSnapshot", "()V", &[]);
+                        }
+                        SideEffect::SetKeepScreenOn(on) => {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "setKeepScreenOnFromRust",
+                                "(Z)V",
+                                &[JValue::Bool(if on { 1 } else { 0 })],
+                            );
+                        }
+                    },
                 }
             }
         }
@@ -376,7 +458,7 @@ fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
                 st.ui.control_center_open = false;
             } else {
                 st.ui.open_control_center();
-                st.pending_effect = SideEffect::RefreshSystemSnapshot;
+                st.pending_calls.push(PendingJavaCall::Effect(SideEffect::RefreshSystemSnapshot));
             }
         }
         BoundAction::OpenSettings => {
@@ -385,14 +467,23 @@ fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
             } else {
                 st.ui.control_center_open = false;
                 st.ui.settings.open_at(SettingsCategory::Appearance);
-                st.pending_effect = SideEffect::RefreshSystemSnapshot;
+                st.pending_calls.push(PendingJavaCall::Effect(SideEffect::RefreshSystemSnapshot));
             }
+        }
+        BoundAction::OpenSearch => {
+            st.ui.control_center_open = false;
+            st.ui.settings.open = false;
+            st.ui.search_ui.open = true;
+            st.ui.search_ui.query.clear();
+            st.ui.search_ui.focus_row = 0;
+            st.ui.search_ui.key_idx = 0;
+            st.ui.search_ui.result_idx = 0;
         }
         BoundAction::OpenRecentApps => {
             st.ui.control_center_open = false;
             st.ui.settings.open = false;
             st.ui.recent_apps_open = !st.ui.recent_apps_open;
-            st.pending_effect = SideEffect::RefreshSystemSnapshot;
+            st.pending_calls.push(PendingJavaCall::Effect(SideEffect::RefreshSystemSnapshot));
         }
         BoundAction::ToggleClockStyle => {
             st.ui.clock_style = (st.ui.clock_style + 1) % 3;
@@ -403,10 +494,10 @@ fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
             st.scene_dirty = true;
         }
         BoundAction::TriggerVoiceAssist => {
-            st.pending_effect = SideEffect::TriggerVoiceSearch;
+            st.pending_calls.push(PendingJavaCall::StartVoiceAssistant);
         }
         BoundAction::LaunchApp(pkg) => {
-            st.pending_launch_pkg = Some(pkg);
+            st.pending_calls.push(PendingJavaCall::LaunchPkg(pkg));
         }
     }
 }
@@ -433,6 +524,77 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnRemoteKey(
         if let Some(act) = st.mapper.on_raw_key(key_code, scan_code) {
             apply_bound_action(&mut st, act);
         }
+        if let Some((vkc, vsc)) = st.mapper.captured_voice_pair.take() {
+            st.pending_calls.push(PendingJavaCall::SaveVoiceKeybind(vkc, vsc));
+            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+        } else if st.mapper.capture_target == CaptureTarget::None {
+            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+        }
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOpenSearchWithQuery(
+    mut env: JNIEnv,
+    _class: JClass,
+    query: JString,
+) {
+    let q: String = env.get_string(&query).map(|s| s.into()).unwrap_or_default();
+    if let Ok(mut st) = STATE.lock() {
+        st.ui.control_center_open = false;
+        st.ui.settings.open = false;
+        st.ui.app_menu.open = false;
+        st.ui.search_ui.open = true;
+        st.ui.search_ui.query = q;
+        st.ui.search_ui.focus_row = if st.ui.search_ui.query.is_empty() { 0 } else { 1 };
+        st.ui.search_ui.result_idx = 0;
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetVoiceHud(
+    mut env: JNIEnv,
+    _class: JClass,
+    active: jboolean,
+    title: JString,
+    subtitle: JString,
+) {
+    let t: String = env.get_string(&title).map(|s| s.into()).unwrap_or_default();
+    let sub: String = env.get_string(&subtitle).map(|s| s.into()).unwrap_or_default();
+    if let Ok(mut st) = STATE.lock() {
+        st.ui.voice_hud = if active != 0 { Some((t, sub)) } else { None };
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetHiddenApps(
+    mut env: JNIEnv,
+    _class: JClass,
+    packages: JObjectArray,
+    labels: JObjectArray,
+) {
+    let count = env.get_array_length(&packages).unwrap_or(0).max(0) as usize;
+    let mut hidden = Vec::with_capacity(count);
+    for i in 0..count {
+        let pkg: String = env
+            .get_object_array_element(&packages, i as i32)
+            .ok()
+            .and_then(|o| env.get_string(&JString::from(o)).ok().map(|s| s.into()))
+            .unwrap_or_default();
+        let lbl: String = env
+            .get_object_array_element(&labels, i as i32)
+            .ok()
+            .and_then(|o| env.get_string(&JString::from(o)).ok().map(|s| s.into()))
+            .unwrap_or_default();
+        if !pkg.is_empty() {
+            hidden.push((pkg, lbl));
+        }
+    }
+    if let Ok(mut st) = STATE.lock() {
+        st.ui.hidden_apps = hidden;
         st.request_redraw();
     }
 }
@@ -485,8 +647,11 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
     packages: JObjectArray,
     labels: JObjectArray,
     icons: JObjectArray,
+    is_builtin: JBooleanArray,
     icon_size: jint,
 ) {
+    let mut builtin_flags = vec![0u8; env.get_array_length(&packages).unwrap_or(0).max(0) as usize];
+    let _ = env.get_boolean_array_region(&is_builtin, 0, &mut builtin_flags);
     let count = env.get_array_length(&packages).unwrap_or(0).max(0) as usize;
     let sz = icon_size.max(0) as u32;
     let expected_len = (sz * sz * 4) as usize;
@@ -503,18 +668,12 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
         let pkg: String = env
             .get_object_array_element(&packages, i as i32)
             .ok()
-            .and_then(|o| {
-                let jstr = JString::from(o);
-                env.get_string(&jstr).ok().map(|s| s.into())
-            })
+            .and_then(|o| env.get_string(&JString::from(o)).ok().map(|s| s.into()))
             .unwrap_or_default();
         let lbl: String = env
             .get_object_array_element(&labels, i as i32)
             .ok()
-            .and_then(|o| {
-                let jstr = JString::from(o);
-                env.get_string(&jstr).ok().map(|s| s.into())
-            })
+            .and_then(|o| env.get_string(&JString::from(o)).ok().map(|s| s.into()))
             .unwrap_or_default();
 
         let icon_pm = if sz > 0 {
@@ -542,6 +701,7 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
             label: lbl,
             icon: icon_pm,
             accent: palette[i % palette.len()],
+            is_builtin: builtin_flags.get(i).copied().unwrap_or(0) != 0,
         });
     }
     if let Ok(mut st) = STATE.lock() {
@@ -550,16 +710,227 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetApps(
     }
 }
 
-fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
+fn execute_app_menu_selection(st: &mut SharedState) {
+    let idx = st.ui.app_menu.app_idx;
+    let choice = st.ui.app_menu.selected;
+    st.ui.app_menu.open = false;
+
+    let Some(app) = st.ui.apps.get(idx).cloned() else {
+        return;
+    };
+    if app.package_name == SETTINGS_TILE_PKG {
+        return;
+    }
+
+    match choice {
+        0 => {
+            // Open
+            st.pending_calls.push(PendingJavaCall::LaunchPkg(app.package_name));
+        }
+        1 => {
+            // Rename
+            st.pending_calls.push(PendingJavaCall::RenameApp(app.package_name, app.label));
+        }
+        2 => {
+            // Move Left
+            if idx > 0 {
+                st.ui.apps.swap(idx, idx - 1);
+                st.ui.selected_index = idx - 1;
+                persist_dock_order(st);
+            }
+        }
+        3 => {
+            // Move Right
+            let max_app_idx = st.ui.apps.len().saturating_sub(2);
+            if idx < max_app_idx {
+                st.ui.apps.swap(idx, idx + 1);
+                st.ui.selected_index = idx + 1;
+                persist_dock_order(st);
+            }
+        }
+        4 => {
+            // Hide App
+            st.pending_calls.push(PendingJavaCall::SetAppHidden(app.package_name, true));
+        }
+        5 => {
+            // App Details
+            st.pending_calls.push(PendingJavaCall::OpenAppDetails(app.package_name));
+        }
+        6 => {
+            // Disable (built-in) or Uninstall (user-installed)
+            if app.is_builtin {
+                st.pending_calls.push(PendingJavaCall::DisableApp(app.package_name));
+            } else {
+                st.pending_calls.push(PendingJavaCall::UninstallApp(app.package_name));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn persist_dock_order(st: &mut SharedState) {
+    let csv: Vec<String> = st
+        .ui
+        .apps
+        .iter()
+        .filter(|a| a.package_name != SETTINGS_TILE_PKG)
+        .map(|a| a.package_name.clone())
+        .collect();
+    st.pending_calls.push(PendingJavaCall::SaveDockOrder(csv.join(",")));
+}
+
+fn activate_ok_press(st: &mut SharedState, row_count: usize) {
+    if st.ui.app_menu.open {
+        execute_app_menu_selection(st);
+        return;
+    }
+
+    if st.ui.search_ui.open {
+        if st.ui.search_ui.focus_row == 0 {
+            let k = SEARCH_KEYS[st.ui.search_ui.key_idx % SEARCH_KEYS.len()];
+            match k {
+                "SPACE" => st.ui.search_ui.query.push(' '),
+                "DEL" => {
+                    st.ui.search_ui.query.pop();
+                }
+                "MIC" => {
+                    st.pending_calls.push(PendingJavaCall::StartVoiceAssistant);
+                }
+                ch => st.ui.search_ui.query.push_str(&ch.to_lowercase()),
+            }
+        } else {
+            let results = st.ui.search_matching_apps();
+            if let Some((pkg, _lbl, is_action)) = results.get(st.ui.search_ui.result_idx).cloned() {
+                let q = st.ui.search_ui.query.trim().to_string();
+                st.ui.search_ui.open = false;
+                if is_action && !q.is_empty() {
+                    st.pending_calls.push(PendingJavaCall::SearchInPackage(pkg, q));
+                } else {
+                    st.pending_calls.push(PendingJavaCall::LaunchPkg(pkg));
+                }
+            }
+        }
+        return;
+    }
+
+    if st.ui.ambient_mode_open {
+        st.ui.ambient_mode_open = false;
+    } else if st.ui.settings.open {
+        if !st.ui.settings.in_right_pane {
+            st.ui.settings.move_right(row_count);
+        } else {
+            let rows = st
+                .ui
+                .build_settings_rows(&st.mapper.voice_key_label, st.mapper.bound_count);
+            if let Some(item) = rows.get(st.ui.settings.row_idx) {
+                if item.action_id == "capture_voice_key" {
+                    st.mapper.capture_target = CaptureTarget::VoiceAssistant;
+                    st.mapper.voice_key_label = "Press remote button now…".into();
+                    st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
+                } else if item.action_id == "capture_cc_key" {
+                    st.mapper.capture_target = CaptureTarget::ControlCenter;
+                    st.mapper.last_captured_label = "Press remote button now…".into();
+                    st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
+                } else if let Some(rest) = item.action_id.strip_prefix("unhide:") {
+                    if let Ok(hidx) = rest.parse::<usize>() {
+                        if let Some((pkg, _)) = st.ui.hidden_apps.get(hidx).cloned() {
+                            st.pending_calls.push(PendingJavaCall::SetAppHidden(pkg, false));
+                        }
+                    }
+                } else {
+                    let (dirty, eff, _) = st.ui.execute_setting_action(item.action_id);
+                    if dirty {
+                        st.scene_dirty = true;
+                    }
+                    if eff != SideEffect::None {
+                        st.pending_calls.push(PendingJavaCall::Effect(eff));
+                    }
+                }
+            }
+        }
+    } else if st.ui.control_center_open {
+        let (eff, _) = st.ui.activate_control_center_item();
+        if eff != SideEffect::None {
+            st.pending_calls.push(PendingJavaCall::Effect(eff));
+        }
+    } else if st.ui.recent_apps_open {
+        let app_count = st.ui.apps.len().saturating_sub(1);
+        if app_count > 0 {
+            let idx = st.ui.recent_selected % app_count;
+            if let Some(tile) = st.ui.apps.get(idx) {
+                st.ui.recent_apps_open = false;
+                st.pending_calls.push(PendingJavaCall::LaunchPkg(tile.package_name.clone()));
+            }
+        }
+    } else if st.ui.weather_popup_open {
+        st.ui.weather_popup_open = false;
+    } else {
+        match st.ui.focus_zone {
+            FocusZone::TopWeather => {
+                st.ui.weather_popup_open = true;
+            }
+            FocusZone::TopControlCenter => {
+                st.ui.open_control_center();
+                st.pending_calls.push(PendingJavaCall::Effect(SideEffect::RefreshSystemSnapshot));
+            }
+            FocusZone::Dock => {
+                if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
+                    if app_tile.package_name == SETTINGS_TILE_PKG {
+                        st.ui.settings.open_at(SettingsCategory::Appearance);
+                        st.pending_calls.push(PendingJavaCall::Effect(SideEffect::RefreshSystemSnapshot));
+                    } else {
+                        st.pending_calls.push(PendingJavaCall::LaunchPkg(app_tile.package_name.clone()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, repeat_count: i32) -> bool {
+    if action == KeyAction::Up {
+        if kc == AKEYCODE_DPAD_CENTER || kc == AKEYCODE_ENTER {
+            let was_long = st.ok_long_fired;
+            st.ok_pressed_at = None;
+            st.ok_long_fired = false;
+            if !was_long {
+                let row_count = if st.ui.settings.open {
+                    st.ui
+                        .build_settings_rows(&st.mapper.voice_key_label, st.mapper.bound_count)
+                        .len()
+                } else {
+                    0
+                };
+                activate_ok_press(st, row_count);
+                st.needs_redraw = true;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    if action != KeyAction::Down {
+        return false;
+    }
+
     if let Some(bound) = st.mapper.on_raw_key(kc, sc) {
         apply_bound_action(st, bound);
         st.needs_redraw = true;
         return true;
     }
+    if let Some((vkc, vsc)) = st.mapper.captured_voice_pair.take() {
+        st.pending_calls.push(PendingJavaCall::SaveVoiceKeybind(vkc, vsc));
+        st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+        st.needs_redraw = true;
+        return true;
+    }
+    if st.mapper.capture_target == CaptureTarget::None && repeat_count == 0 {
+        st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+    }
 
     let row_count = if st.ui.settings.open {
         st.ui
-            .build_settings_rows(&st.mapper.last_captured_label, st.mapper.bound_count)
+            .build_settings_rows(&st.mapper.voice_key_label, st.mapper.bound_count)
             .len()
     } else {
         0
@@ -582,7 +953,7 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
                 if app_count > 0 {
                     let idx = st.ui.recent_selected % app_count;
                     if let Some(tile) = st.ui.apps.get(idx) {
-                        st.pending_kill_pkg = Some(tile.package_name.clone());
+                        st.pending_calls.push(PendingJavaCall::KillPkg(tile.package_name.clone()));
                     }
                 }
             } else {
@@ -597,72 +968,55 @@ fn handle_key_down(st: &mut SharedState, kc: i32, sc: i32) -> bool {
             true
         }
         AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
-            if st.ui.ambient_mode_open {
-                st.ui.ambient_mode_open = false;
-            } else if st.ui.settings.open {
-                if !st.ui.settings.in_right_pane {
-                    st.ui.settings.move_right(row_count);
-                } else {
-                    let rows = st
-                        .ui
-                        .build_settings_rows(&st.mapper.last_captured_label, st.mapper.bound_count);
-                    if let Some(item) = rows.get(st.ui.settings.row_idx) {
-                        let (dirty, eff, start_capture) =
-                            st.ui.execute_setting_action(item.action_id);
-                        if dirty {
-                            st.scene_dirty = true;
-                        }
-                        if start_capture {
-                            st.mapper.capture_mode = true;
-                            st.mapper.last_captured_label = "Press remote button now…".into();
-                        }
-                        if eff != SideEffect::None {
-                            st.pending_effect = eff;
-                        }
-                    }
-                }
-            } else if st.ui.control_center_open {
-                let (eff, _) = st.ui.activate_control_center_item();
-                if eff != SideEffect::None {
-                    st.pending_effect = eff;
-                }
-            } else if st.ui.recent_apps_open {
-                let app_count = st.ui.apps.len().saturating_sub(1);
-                if app_count > 0 {
-                    let idx = st.ui.recent_selected % app_count;
-                    if let Some(tile) = st.ui.apps.get(idx) {
-                        st.ui.recent_apps_open = false;
-                        st.pending_launch_pkg = Some(tile.package_name.clone());
-                    }
-                }
-            } else if st.ui.weather_popup_open {
-                st.ui.weather_popup_open = false;
-            } else {
-                match st.ui.focus_zone {
-                    FocusZone::TopWeather => {
-                        st.ui.weather_popup_open = true;
-                    }
-                    FocusZone::TopControlCenter => {
-                        st.ui.open_control_center();
-                        st.pending_effect = SideEffect::RefreshSystemSnapshot;
-                    }
-                    FocusZone::Dock => {
-                        if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
-                            if app_tile.package_name == SETTINGS_TILE_PKG {
-                                st.ui.settings.open_at(SettingsCategory::Appearance);
-                                st.pending_effect = SideEffect::RefreshSystemSnapshot;
-                            } else {
-                                st.pending_launch_pkg = Some(app_tile.package_name.clone());
-                            }
-                        }
-                    }
-                }
+            if repeat_count == 0 {
+                st.ok_pressed_at = Some(Instant::now());
+                st.ok_long_fired = false;
+            } else if !st.ok_long_fired
+                && !st.ui.app_menu.open
+                && !st.ui.search_ui.open
+                && !st.ui.settings.open
+                && !st.ui.control_center_open
+                && st.ui.focus_zone == FocusZone::Dock
+            {
+                st.ui.open_app_context_menu();
+                st.ok_long_fired = true;
             }
             st.needs_redraw = true;
             true
         }
+        AKEYCODE_DEL => {
+            if st.ui.search_ui.open {
+                st.ui.search_ui.query.pop();
+                st.needs_redraw = true;
+                return true;
+            }
+            false
+        }
+        29..=54 if st.ui.search_ui.open => {
+            let ch = (b'a' + (kc - 29) as u8) as char;
+            st.ui.search_ui.query.push(ch);
+            st.ui.search_ui.result_idx = 0;
+            st.needs_redraw = true;
+            true
+        }
+        7..=16 if st.ui.search_ui.open => {
+            let ch = (b'0' + (kc - 7) as u8) as char;
+            st.ui.search_ui.query.push(ch);
+            st.ui.search_ui.result_idx = 0;
+            st.needs_redraw = true;
+            true
+        }
+        62 if st.ui.search_ui.open => {
+            st.ui.search_ui.query.push(' ');
+            st.needs_redraw = true;
+            true
+        }
         AKEYCODE_BACK => {
-            if st.ui.ambient_mode_open {
+            if st.ui.app_menu.open {
+                st.ui.app_menu.open = false;
+            } else if st.ui.search_ui.open {
+                st.ui.search_ui.open = false;
+            } else if st.ui.ambient_mode_open {
                 st.ui.ambient_mode_open = false;
             } else if st.ui.settings.open {
                 if st.ui.settings.in_right_pane {
@@ -753,6 +1107,14 @@ pub fn android_main(app: AndroidApp) {
             let st = STATE.lock().unwrap();
             if st.needs_redraw {
                 Some(Duration::from_millis(16))
+            } else if let Some(down_at) = st.ok_pressed_at {
+                if !st.ok_long_fired {
+                    let elapsed = down_at.elapsed();
+                    let hold_target = Duration::from_millis(480);
+                    Some(hold_target.saturating_sub(elapsed).max(Duration::from_millis(10)))
+                } else {
+                    Some(Duration::from_secs(30))
+                }
             } else {
                 let now_secs = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -791,6 +1153,25 @@ pub fn android_main(app: AndroidApp) {
             _ => {}
         });
 
+        // Check if OK button was held >= 480ms on a dock app -> open App Long-Press Menu!
+        {
+            let mut st = STATE.lock().unwrap();
+            if let Some(down_at) = st.ok_pressed_at {
+                if !st.ok_long_fired
+                    && down_at.elapsed() >= Duration::from_millis(480)
+                    && !st.ui.app_menu.open
+                    && !st.ui.search_ui.open
+                    && !st.ui.settings.open
+                    && !st.ui.control_center_open
+                    && st.ui.focus_zone == FocusZone::Dock
+                {
+                    st.ui.open_app_context_menu();
+                    st.ok_long_fired = true;
+                    st.needs_redraw = true;
+                }
+            }
+        }
+
         if refresh_tz {
             if let Some(offset) = refresh_timezone_offset(&app) {
                 if let Ok(mut st) = STATE.lock() {
@@ -803,13 +1184,13 @@ pub fn android_main(app: AndroidApp) {
             while iter.next(|event| {
                 match event {
                     InputEvent::KeyEvent(ke) => {
-                        if ke.action() == KeyAction::Down {
-                            let kc: i32 = u32::from(ke.key_code()) as i32;
-                            let sc: i32 = ke.scan_code();
-                            let mut st = STATE.lock().unwrap();
-                            if handle_key_down(&mut st, kc, sc) {
-                                return InputStatus::Handled;
-                            }
+                        let kc: i32 = u32::from(ke.key_code()) as i32;
+                        let sc: i32 = ke.scan_code();
+                        let act = ke.action();
+                        let rep = ke.repeat_count();
+                        let mut st = STATE.lock().unwrap();
+                        if handle_key_event(&mut st, kc, sc, act, rep) {
+                            return InputStatus::Handled;
                         }
                     }
                     InputEvent::MotionEvent(me) => {
@@ -818,13 +1199,42 @@ pub fn android_main(app: AndroidApp) {
                                 let x = ptr.x();
                                 let y = ptr.y();
                                 let mut st = STATE.lock().unwrap();
+                                if st.ui.app_menu.open {
+                                    // Tap inside app context menu selects row or dismisses
+                                    let (sw, sh) = st.screen_dims;
+                                    let unit = (sw / 960.0).min(sh / 540.0);
+                                    let items = st.ui.app_menu_items();
+                                    let panel_w = (360.0 * unit).round();
+                                    let row_h = (36.0 * unit).round();
+                                    let row_gap = (7.0 * unit).round();
+                                    let header_h = (56.0 * unit).round();
+                                    let pad = (18.0 * unit).round();
+                                    let panel_h = pad * 2.0 + header_h + (items.len() as f32) * (row_h + row_gap);
+                                    let px = ((sw - panel_w) * 0.5).round();
+                                    let py = ((sh - panel_h) * 0.5).round();
+                                    if x < px || x > px + panel_w || y < py || y > py + panel_h {
+                                        st.ui.app_menu.open = false;
+                                    } else {
+                                        let list_y = py + pad + header_h;
+                                        for i in 0..items.len() {
+                                            let ry = list_y + (i as f32) * (row_h + row_gap);
+                                            if y >= ry && y <= ry + row_h {
+                                                st.ui.app_menu.selected = i;
+                                                execute_app_menu_selection(&mut st);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    st.needs_redraw = true;
+                                    return InputStatus::Handled;
+                                }
                                 let (sw, sh) = st.screen_dims;
                                 let (pkg, eff) = st.ui.handle_tap(x, y, sw, sh);
                                 if let Some(p) = pkg {
-                                    st.pending_launch_pkg = Some(p);
+                                    st.pending_calls.push(PendingJavaCall::LaunchPkg(p));
                                 }
                                 if eff != SideEffect::None {
-                                    st.pending_effect = eff;
+                                    st.pending_calls.push(PendingJavaCall::Effect(eff));
                                 }
                                 st.needs_redraw = true;
                                 return InputStatus::Handled;
@@ -846,6 +1256,6 @@ pub fn android_main(app: AndroidApp) {
                 render_window(&win, &mut st);
             }
         }
-        dispatch_java_side_effects(&app, &mut st);
+        dispatch_java_calls(&app, &mut st);
     }
 }
