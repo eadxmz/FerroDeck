@@ -1,6 +1,6 @@
 //! Full Remote KeyCode + ScanCode capture & action router.
-//! Captures OEM keys (including the yellow mic / voice assistant button) even when
-//! Android assigns `keyCode == 0` (`KEYCODE_UNKNOWN`) with a hardware `scanCode`.
+//! Supports separate custom keybinds for Voice Assistant and Control Center,
+//! capturing OEM buttons even when `keyCode == 0` (`KEYCODE_UNKNOWN`) with a `scanCode`.
 
 use std::collections::HashMap;
 
@@ -12,6 +12,7 @@ pub const AKEYCODE_DPAD_LEFT: i32 = 21;
 pub const AKEYCODE_DPAD_RIGHT: i32 = 22;
 pub const AKEYCODE_DPAD_CENTER: i32 = 23;
 pub const AKEYCODE_ENTER: i32 = 66;
+pub const AKEYCODE_DEL: i32 = 67;
 pub const AKEYCODE_MENU: i32 = 82;
 pub const AKEYCODE_SEARCH: i32 = 84;
 pub const AKEYCODE_SETTINGS: i32 = 176;
@@ -26,11 +27,19 @@ pub fn pack_key_id(key_code: i32, scan_code: i32) -> u32 {
     (sc << 16) | kc
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CaptureTarget {
+    None,
+    ControlCenter,
+    VoiceAssistant,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BoundAction {
     OpenControlCenter,
     OpenSettings,
+    OpenSearch,
     OpenRecentApps,
     ToggleClockStyle,
     CycleWallpaper,
@@ -40,9 +49,10 @@ pub enum BoundAction {
 
 pub struct RemoteMapper {
     pub bindings: HashMap<u32, BoundAction>,
-    pub capture_mode: bool,
-    pub last_captured_key_id: Option<u32>,
+    pub capture_target: CaptureTarget,
     pub last_captured_label: String,
+    pub voice_key_label: String,
+    pub captured_voice_pair: Option<(i32, i32)>,
     pub bound_count: usize,
 }
 
@@ -58,9 +68,10 @@ impl RemoteMapper {
         let bound_count = bindings.len();
         Self {
             bindings,
-            capture_mode: false,
-            last_captured_key_id: None,
+            capture_target: CaptureTarget::None,
             last_captured_label: "Press OK then remote button".into(),
+            voice_key_label: "Yellow Mic / Voice Assist".into(),
+            captured_voice_pair: None,
             bound_count,
         }
     }
@@ -84,12 +95,25 @@ impl RemoteMapper {
             return None;
         }
 
-        if self.capture_mode && !Self::is_reserved_nav(key_code) && key_code != AKEYCODE_HOME {
-            self.last_captured_key_id = Some(key_id);
-            self.last_captured_label = format!("KEY (#{} / sc:{})", key_code, scan_code);
-            self.bindings.insert(key_id, BoundAction::OpenControlCenter);
+        if self.capture_target != CaptureTarget::None
+            && !Self::is_reserved_nav(key_code)
+            && key_code != AKEYCODE_HOME
+        {
+            let desc = format!("KEY (#{} / sc:{})", key_code, scan_code);
+            match self.capture_target {
+                CaptureTarget::VoiceAssistant => {
+                    self.voice_key_label = desc;
+                    self.bindings.insert(key_id, BoundAction::TriggerVoiceAssist);
+                    self.captured_voice_pair = Some((key_code, scan_code));
+                }
+                CaptureTarget::ControlCenter => {
+                    self.last_captured_label = desc;
+                    self.bindings.insert(key_id, BoundAction::OpenControlCenter);
+                }
+                CaptureTarget::None => {}
+            }
             self.bound_count = self.bindings.len();
-            self.capture_mode = false;
+            self.capture_target = CaptureTarget::None;
             return None;
         }
 
