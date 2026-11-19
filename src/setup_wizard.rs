@@ -96,6 +96,12 @@ impl SetupWizard {
         self.selected = 0;
     }
 
+    pub fn open_at_step(&mut self, step: usize) {
+        self.open = true;
+        self.step = step.min(SETUP_TOTAL_STEPS - 1);
+        self.selected = 0;
+    }
+
     pub fn step_header(&self) -> (&'static str, &'static str) {
         match self.step {
             0 => ("Welcome", "Let's set up FerroDeck. Choose Native (India) or Global language."),
@@ -328,6 +334,7 @@ impl SetupWizard {
         unit: f32,
         options: &[SetupOption],
         profile_name: &str,
+        status_banner: Option<&str>,
     ) {
         if !self.open {
             return;
@@ -603,6 +610,47 @@ impl SetupWizard {
                     (ry + row_h * 0.65) as i32,
                     (13.5 * unit).round(),
                     Color::from_rgba8(46, 204, 113, 255),
+                    false,
+                );
+            }
+        }
+
+        // 5b. Live status pill above pagination dots (e.g. Easy ADB feedback)
+        if let Some(msg) = status_banner {
+            if !msg.is_empty() {
+                let mpx = (11.0 * unit).round();
+                let mw = measure_label_width(self.font_medium.as_ref(), msg, mpx);
+                let bw = (mw + 28.0 * unit).min(sw - 64.0 * unit).round();
+                let bh = (24.0 * unit).round();
+                let bx = ((sw - bw) * 0.5).round();
+                let by = (sh - 60.0 * unit).round();
+                if let Some(bp) = rounded_rect_path(bx, by, bw, bh, bh * 0.5) {
+                    let mut bg = Paint::default();
+                    bg.anti_alias = true;
+                    bg.set_color(Color::from_rgba8(20, 26, 40, 236));
+                    pm.fill_path(&bp, &bg, FillRule::Winding, Transform::identity(), None);
+                    let mut rim = Paint::default();
+                    rim.anti_alias = true;
+                    rim.set_color(Color::from_rgba8(120, 195, 255, 130));
+                    pm.stroke_path(
+                        &bp,
+                        &rim,
+                        &Stroke {
+                            width: 1.0,
+                            ..Default::default()
+                        },
+                        Transform::identity(),
+                        None,
+                    );
+                }
+                draw_crisp_label(
+                    pm,
+                    self.font_medium.as_ref(),
+                    msg,
+                    (bx + 14.0 * unit) as i32,
+                    (by + bh * 0.68) as i32,
+                    mpx,
+                    Color::from_rgba8(152, 218, 255, 250),
                     false,
                 );
             }

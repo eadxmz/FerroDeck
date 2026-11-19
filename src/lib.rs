@@ -421,9 +421,10 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                             let _ = env.call_method(
                                 &act_obj,
                                 "savePrefsFromRust",
-                                "(ZLjava/lang/String;Ljava/lang/String;ZZZLjava/lang/String;)V",
+                                "(ZILjava/lang/String;Ljava/lang/String;ZZZLjava/lang/String;)V",
                                 &[
                                     JValue::Bool(if st.ui.setup_done { 1 } else { 0 }),
+                                    JValue::Int(st.ui.setup.step as i32),
                                     (&jn).into(),
                                     (&jl).into(),
                                     JValue::Bool(if st.ui.classic_look { 1 } else { 0 }),
@@ -520,9 +521,10 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                                 let _ = env.call_method(
                                     &act_obj,
                                     "savePrefsFromRust",
-                                    "(ZLjava/lang/String;Ljava/lang/String;ZZZLjava/lang/String;)V",
+                                    "(ZILjava/lang/String;Ljava/lang/String;ZZZLjava/lang/String;)V",
                                     &[
                                         JValue::Bool(if st.ui.setup_done { 1 } else { 0 }),
+                                        JValue::Int(st.ui.setup.step as i32),
                                         (&jn).into(),
                                         (&jl).into(),
                                         JValue::Bool(if st.ui.classic_look { 1 } else { 0 }),
@@ -596,6 +598,7 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeApplyLoadedPrefs(
     mut env: JNIEnv,
     _class: JClass,
     setup_done: jboolean,
+    setup_step: jint,
     profile_name: JString,
     lang_code: JString,
     classic_look: jboolean,
@@ -622,8 +625,8 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeApplyLoadedPrefs(
         st.ui.weather_enabled = weather_enabled != 0;
         st.ui.weather_auto = weather_auto != 0;
         st.ui.weather_city = city;
-        if !st.ui.setup_done {
-            st.ui.setup.open_fresh();
+        if !st.ui.setup_done && !st.ui.setup.open {
+            st.ui.setup.open_at_step(setup_step.max(0) as usize);
         }
         st.request_redraw();
     }
@@ -930,11 +933,12 @@ fn persist_dock_order(st: &mut SharedState) {
 fn execute_setup_action(st: &mut SharedState, action_id: &str) {
     match action_id {
         "setup_next" => {
+            st.ui.settings.status_banner = None;
             st.ui.setup.next_step();
             if !st.ui.setup.open {
                 st.ui.setup_done = true;
-                st.pending_calls.push(PendingJavaCall::SavePrefs);
             }
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
         }
         "setup_finish" => {
             st.ui.setup.open = false;
@@ -1004,14 +1008,18 @@ fn execute_setup_action(st: &mut SharedState, action_id: &str) {
             st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
         }
         "setup_default_home" => {
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
             st.pending_calls
                 .push(PendingJavaCall::Effect(SideEffect::OpenDefaultHomePicker));
         }
         "setup_a11y" => {
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
             st.pending_calls
                 .push(PendingJavaCall::Effect(SideEffect::OpenAccessibilitySettings));
         }
         "setup_adb_easy" => {
+            st.ui.settings.status_banner = Some("Checking Local ADB (127.0.0.1:5555)...".into());
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
             st.pending_calls
                 .push(PendingJavaCall::Effect(SideEffect::RunAdbPairAndGrant));
         }
@@ -1239,7 +1247,9 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
             }
             AKEYCODE_BACK => {
                 if st.ui.setup.step > 0 {
+                    st.ui.settings.status_banner = None;
                     st.ui.setup.prev_step();
+                    st.pending_calls.push(PendingJavaCall::SavePrefs);
                 } else {
                     st.ui.setup.open = false;
                     st.ui.setup_done = true;
@@ -1411,6 +1421,7 @@ pub fn android_main(app: AndroidApp) {
         let prev_hidden = std::mem::take(&mut st.ui.hidden_apps);
         let prev_setup_done = st.ui.setup_done;
         let prev_setup_open = st.ui.setup.open;
+        let prev_setup_step = st.ui.setup.step;
         let prev_name = st.ui.user_name.clone();
         let prev_lang = st.ui.lang_code;
         let prev_lang_global = st.ui.lang_region_global;
@@ -1443,6 +1454,7 @@ pub fn android_main(app: AndroidApp) {
         st.ui.hidden_apps = prev_hidden;
         st.ui.setup_done = prev_setup_done;
         st.ui.setup.open = prev_setup_open || !prev_setup_done;
+        st.ui.setup.step = prev_setup_step;
         st.ui.user_name = prev_name;
         st.ui.lang_code = prev_lang;
         st.ui.lang_region_global = prev_lang_global;

@@ -67,6 +67,7 @@ public class MainActivity extends NativeActivity {
     public static native void nativeSetVoiceHud(boolean active, String title, String subtitle);
     public static native void nativeApplyLoadedPrefs(
             boolean setupDone,
+            int setupStep,
             String profileName,
             String langCode,
             boolean classicLook,
@@ -399,7 +400,8 @@ public class MainActivity extends NativeActivity {
     private void loadAndPushSavedPrefs() {
         SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
         boolean setupDone = sp.getBoolean("setup_done", false);
-        String profileName = sp.getString("profile_name", "sadim");
+        int setupStep = sp.getInt("setup_step", 0);
+        String profileName = sp.getString("profile_name", "Home");
         String langCode = sp.getString("lang_code", "en");
         boolean classicLook = sp.getBoolean("classic_look", false);
         boolean weatherEnabled = sp.getBoolean("weather_enabled", true);
@@ -408,6 +410,7 @@ public class MainActivity extends NativeActivity {
 
         nativeApplyLoadedPrefs(
                 setupDone,
+                setupStep,
                 profileName,
                 langCode,
                 classicLook,
@@ -422,6 +425,7 @@ public class MainActivity extends NativeActivity {
 
     public void savePrefsFromRust(
             boolean setupDone,
+            int setupStep,
             String profileName,
             String langCode,
             boolean classicLook,
@@ -431,7 +435,8 @@ public class MainActivity extends NativeActivity {
         getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean("setup_done", setupDone)
-                .putString("profile_name", profileName != null ? profileName : "sadim")
+                .putInt("setup_step", setupStep)
+                .putString("profile_name", (profileName != null && !profileName.isEmpty()) ? profileName : "Home")
                 .putString("lang_code", langCode != null ? langCode : "en")
                 .putBoolean("classic_look", classicLook)
                 .putBoolean("weather_enabled", weatherEnabled)
@@ -461,6 +466,7 @@ public class MainActivity extends NativeActivity {
                                 sp.edit().putString("profile_name", next).apply();
                                 nativeApplyLoadedPrefs(
                                         sp.getBoolean("setup_done", false),
+                                        sp.getInt("setup_step", 1),
                                         next,
                                         sp.getString("lang_code", "en"),
                                         sp.getBoolean("classic_look", false),
@@ -907,12 +913,44 @@ public class MainActivity extends NativeActivity {
 
     public void runLocalAdbPairFromRust(final boolean secureMode) {
         new Thread(() -> {
-            if (!isLocalAdbPortOpen()) {
-                openSafeIntent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS, Settings.ACTION_SETTINGS);
-                refreshSystemSnapshotWithMsg("Turn on Network Debugging (port 5555), then press Pair again.");
+            final boolean portOpen = isLocalAdbPortOpen();
+            final String pkg = getPackageName();
+            if (!portOpen) {
+                refreshSystemSnapshotWithMsg("Local ADB (port 5555) is disabled on this device.");
+                runOnUiThread(() -> {
+                    try {
+                        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                                .setTitle("ADB Debugging Not Enabled")
+                                .setMessage("Local ADB port 127.0.0.1:5555 is closed.\n\n"
+                                        + "To enable Easy Setup on your TV:\n"
+                                        + "1. Open Developer Options and enable USB / Network Debugging.\n"
+                                        + "2. Or run from your PC:\n"
+                                        + "adb shell pm grant " + pkg + " android.permission.WRITE_SECURE_SETTINGS")
+                                .setPositiveButton("Open Developer Options", (d, w) ->
+                                        openSafeIntent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS, Settings.ACTION_SETTINGS))
+                                .setNegativeButton("Close", null)
+                                .show();
+                    } catch (Throwable ignored) { }
+                });
                 return;
             }
-            refreshSystemSnapshotWithMsg("ADB port 5555 reachable — ready for permission grant.");
+
+            refreshSystemSnapshotWithMsg("ADB port 5555 detected — ready for permission grant.");
+            runOnUiThread(() -> {
+                try {
+                    new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                            .setTitle("Local ADB Connected (127.0.0.1:5555)")
+                            .setMessage("ADB port 5555 is open and reachable.\n\n"
+                                    + "Mode: " + (secureMode ? "Secure Mode (grant & close)" : "Persistent ADB Mode") + "\n\n"
+                                    + "You can also grant all permissions instantly from PC via:\n"
+                                    + "adb shell pm grant " + pkg + " android.permission.WRITE_SECURE_SETTINGS\n"
+                                    + "adb shell pm grant " + pkg + " android.permission.RECORD_AUDIO")
+                            .setPositiveButton("Open Accessibility Settings", (d, w) ->
+                                    openSafeIntent(Settings.ACTION_ACCESSIBILITY_SETTINGS, Settings.ACTION_SETTINGS))
+                            .setNegativeButton("Done", null)
+                            .show();
+                } catch (Throwable ignored) { }
+            });
         }, "ferrodeck-adb").start();
     }
 

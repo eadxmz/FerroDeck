@@ -567,7 +567,7 @@ impl LauncherUi {
             clock_style: 0,
             clock_24h: false,
             scene_idx: 0,
-            user_name: "sadim".into(),
+            user_name: "Home".into(),
             weather_enabled: true,
             weather_auto: true,
             weather_city: String::new(),
@@ -1207,8 +1207,10 @@ impl LauncherUi {
             }
             "run_setup_again" => {
                 self.settings.open = false;
+                self.setup_done = false;
+                self.settings.status_banner = None;
                 self.setup.open_fresh();
-                (false, SideEffect::None, false)
+                (false, SideEffect::SavePrefs, false)
             }
             "lang_region_native" => {
                 self.lang_region_global = false;
@@ -1902,6 +1904,7 @@ impl LauncherUi {
                 unit,
                 &setup_opts,
                 &self.user_name,
+                self.settings.status_banner.as_deref(),
             );
         }
 
