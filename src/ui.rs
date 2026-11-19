@@ -7,6 +7,7 @@
 //! 3. Recent Apps Switcher (`image_4f8f85.jpg`): Top-right live RAM meter pill + horizontal app cards
 //! 4. Full Two-Pane Home Settings (`HomeSettingsScreen`) including all Advanced ADB options.
 
+use crate::anim::{ease_out_cubic, smooth_to, spring_to, with_alpha};
 use crate::clock::{draw_crisp_label, measure_label_width, CrispClock};
 use crate::glyphs::{draw_glyph, Glyph};
 use crate::settings_pill::{rounded_rect_path, HomeSettingsScreen, SettingRowItem, SettingsCategory};
@@ -498,9 +499,25 @@ pub struct LauncherUi {
     pub sys: SystemSnapshot,
     wallpaper_pm: Option<Pixmap>,
     foreground_pm: Option<Pixmap>,
+    prev_wallpaper_pm: Option<Pixmap>,
+    prev_foreground_pm: Option<Pixmap>,
+    scene_fade: f32,
     glass_backdrop_pm: Option<Pixmap>,
     settings_icon_pm: Option<Pixmap>,
     focus_scales: Vec<f32>,
+    focus_vels: Vec<f32>,
+    dock_tip_x_u: f32,
+    dock_tip_alpha: f32,
+    top_scales: [f32; 2],
+    top_tip_alphas: [f32; 2],
+    cc_anim: f32,
+    cc_tile_scales: [f32; 12],
+    app_menu_anim: f32,
+    app_menu_pill_idx: f32,
+    weather_anim: f32,
+    search_anim: f32,
+    recent_anim: f32,
+    recent_scroll_pos: f32,
     font_medium: Option<Font>,
     font_regular: Option<Font>,
     pub clock: CrispClock,
@@ -581,9 +598,25 @@ impl LauncherUi {
             sys: SystemSnapshot::default(),
             wallpaper_pm: None,
             foreground_pm: None,
+            prev_wallpaper_pm: None,
+            prev_foreground_pm: None,
+            scene_fade: 1.0,
             glass_backdrop_pm: None,
             settings_icon_pm: settings_icon,
             focus_scales: Vec::new(),
+            focus_vels: Vec::new(),
+            dock_tip_x_u: -1.0,
+            dock_tip_alpha: 1.0,
+            top_scales: [1.0, 1.0],
+            top_tip_alphas: [0.0, 0.0],
+            cc_anim: 0.0,
+            cc_tile_scales: [1.0; 12],
+            app_menu_anim: 0.0,
+            app_menu_pill_idx: 0.0,
+            weather_anim: 0.0,
+            search_anim: 0.0,
+            recent_anim: 0.0,
+            recent_scroll_pos: 0.0,
             font_medium,
             font_regular,
             clock: CrispClock::new(big_font.or(bold_font), bold_font.or(med_font)),
@@ -603,8 +636,9 @@ impl LauncherUi {
             is_builtin: true,
         });
         self.focus_scales = vec![1.0; apps.len()];
+        self.focus_vels = vec![0.0; apps.len()];
         if !self.focus_scales.is_empty() {
-            self.focus_scales[0] = 1.15;
+            self.focus_scales[0] = 1.16;
         }
         self.apps = apps;
         if self.selected_index >= self.apps.len() {
@@ -619,6 +653,13 @@ impl LauncherUi {
         bg_rgba: Vec<u8>,
         fg: Option<(u32, u32, Vec<u8>)>,
     ) {
+        if self.wallpaper_pm.is_some() {
+            self.prev_wallpaper_pm = self.wallpaper_pm.take();
+            self.prev_foreground_pm = self.foreground_pm.take();
+            self.scene_fade = 0.0;
+        } else {
+            self.scene_fade = 1.0;
+        }
         if let Some(size) = tiny_skia::IntSize::from_wh(bg_w, bg_h) {
             if let Some(pm) = Pixmap::from_vec(bg_rgba, size) {
                 self.glass_backdrop_pm = Some(bake_liquid_glass(&pm));
@@ -715,8 +756,11 @@ impl LauncherUi {
     }
 
     pub fn invalidate_scene_cache(&mut self) {
-        self.wallpaper_pm = None;
-        self.foreground_pm = None;
+        if self.wallpaper_pm.is_some() {
+            self.prev_wallpaper_pm = self.wallpaper_pm.take();
+            self.prev_foreground_pm = self.foreground_pm.take();
+            self.scene_fade = 0.0;
+        }
         self.glass_backdrop_pm = None;
     }
 
@@ -1537,7 +1581,7 @@ impl LauncherUi {
         if self.search_ui.open {
             let margin = (48.0 * unit).round();
             let box_w = sw - margin * 2.0;
-            let key_y = (94.0 * unit).round();
+            let key_y = (94.0 * unit + slide_y).round();
             let key_h = (30.0 * unit).round();
             let key_gap = (4.0 * unit).round();
             let total_keys = SEARCH_KEYS.len();
@@ -1567,7 +1611,7 @@ impl LauncherUi {
                 }
             }
             let results = self.search_matching_apps();
-            let res_top = (146.0 * unit).round();
+            let res_top = (146.0 * unit + slide_y).round();
             let row_h = (38.0 * unit).round();
             let row_gap = (8.0 * unit).round();
             if px >= margin && px <= margin + box_w {
@@ -1717,29 +1761,190 @@ impl LauncherUi {
         (None, SideEffect::None)
     }
 
-    pub fn tick_animations(&mut self) -> bool {
-        let mut busy = self.settings.tick();
-        if self.focus_scales.len() != self.apps.len() {
-            self.focus_scales.resize(self.apps.len(), 1.0);
+    pub fn tick_animations(&mut self, dt: f32) -> bool {
+        let dt = dt.clamp(0.004, 0.045);
+        let mut busy = self.settings.tick(dt);
+        if self.setup.tick(dt) {
+            busy = true;
         }
-        for (i, sc) in self.focus_scales.iter_mut().enumerate() {
-            let target = if self.focus_zone == FocusZone::Dock
-                && i == self.selected_index
-                && !self.settings.open
-                && !self.control_center_open
-            {
-                1.15
+
+        // 1. Background Scene crossfade (drops old pixmaps immediately once finished for 0 RAM overhead)
+        if self.scene_fade < 1.0 {
+            if smooth_to(&mut self.scene_fade, 1.0, 6.5, dt, 0.004) {
+                busy = true;
+            } else {
+                self.prev_wallpaper_pm = None;
+                self.prev_foreground_pm = None;
+            }
+        }
+
+        // 2. Dock squircle icons lively spring physics (all icons animate smoothly up & down)
+        let n = self.apps.len();
+        if self.focus_scales.len() != n {
+            self.focus_scales.resize(n, 1.0);
+        }
+        if self.focus_vels.len() != n {
+            self.focus_vels.resize(n, 0.0);
+        }
+        let dock_active = self.focus_zone == FocusZone::Dock
+            && !self.settings.open
+            && !self.control_center_open
+            && !self.recent_apps_open
+            && !self.app_menu.open
+            && !self.search_ui.open
+            && !self.setup.open;
+
+        for i in 0..n {
+            let target = if dock_active && i == self.selected_index {
+                1.16
             } else {
                 1.0
             };
-            let diff = target - *sc;
-            if diff.abs() > 0.004 {
-                *sc += diff * 0.34;
+            if spring_to(
+                &mut self.focus_scales[i],
+                &mut self.focus_vels[i],
+                target,
+                320.0,
+                25.5,
+                dt,
+                0.002,
+            ) {
                 busy = true;
-            } else {
-                *sc = target;
             }
         }
+
+        // 3. Gliding dock tooltip X position & fade
+        if n > 0 {
+            let end = (self.page_offset + MAX_DOCK_TILES).min(n);
+            let count = end.saturating_sub(self.page_offset);
+            let rel_sel = self.selected_index.saturating_sub(self.page_offset);
+            let dock_w_u = 26.0 + (count as f32) * 46.0 + (count.saturating_sub(1) as f32) * 10.0;
+            let start_x_u = (DESIGN_W - dock_w_u) * 0.5 + 13.0;
+            let target_tip_x_u = start_x_u + (rel_sel as f32) * 56.0 + 23.0;
+            if self.dock_tip_x_u < 0.0 {
+                self.dock_tip_x_u = target_tip_x_u;
+            } else if smooth_to(&mut self.dock_tip_x_u, target_tip_x_u, 20.0, dt, 0.25) {
+                busy = true;
+            }
+        }
+        if smooth_to(
+            &mut self.dock_tip_alpha,
+            if dock_active { 1.0 } else { 0.0 },
+            18.0,
+            dt,
+            0.004,
+        ) {
+            busy = true;
+        }
+
+        // 4. Top-Right Weather & Control Center circular pills
+        let top_free = !self.settings.open
+            && !self.control_center_open
+            && !self.recent_apps_open
+            && !self.search_ui.open
+            && !self.setup.open;
+        let top_targets = [
+            if top_free && self.focus_zone == FocusZone::TopWeather { 1.12 } else { 1.0 },
+            if top_free && self.focus_zone == FocusZone::TopControlCenter { 1.12 } else { 1.0 },
+        ];
+        let tip_targets = [
+            if top_free && self.focus_zone == FocusZone::TopWeather { 1.0 } else { 0.0 },
+            if top_free && self.focus_zone == FocusZone::TopControlCenter { 1.0 } else { 0.0 },
+        ];
+        for k in 0..2 {
+            if smooth_to(&mut self.top_scales[k], top_targets[k], 18.0, dt, 0.002) {
+                busy = true;
+            }
+            if smooth_to(&mut self.top_tip_alphas[k], tip_targets[k], 16.0, dt, 0.004) {
+                busy = true;
+            }
+        }
+
+        // 5. Control Center slide-in/out & per-tile focus pop
+        if smooth_to(
+            &mut self.cc_anim,
+            if self.control_center_open { 1.0 } else { 0.0 },
+            15.0,
+            dt,
+            0.003,
+        ) {
+            busy = true;
+        }
+        for i in 0..12 {
+            let t = if self.control_center_open && self.cc_selected == i {
+                1.045
+            } else {
+                1.0
+            };
+            if smooth_to(&mut self.cc_tile_scales[i], t, 22.0, dt, 0.002) {
+                busy = true;
+            }
+        }
+
+        // 6. Compact Liquid Glass App Context Menu glide + selection pill slide
+        if smooth_to(
+            &mut self.app_menu_anim,
+            if self.app_menu.open { 1.0 } else { 0.0 },
+            17.0,
+            dt,
+            0.003,
+        ) {
+            busy = true;
+        }
+        if self.app_menu.open || self.app_menu_anim > 0.005 {
+            if smooth_to(
+                &mut self.app_menu_pill_idx,
+                self.app_menu.selected as f32,
+                24.0,
+                dt,
+                0.005,
+            ) {
+                busy = true;
+            }
+        }
+
+        // 7. Weather Card & Search Overlay smooth transitions
+        if smooth_to(
+            &mut self.weather_anim,
+            if self.weather_popup_open { 1.0 } else { 0.0 },
+            16.0,
+            dt,
+            0.003,
+        ) {
+            busy = true;
+        }
+        if smooth_to(
+            &mut self.search_anim,
+            if self.search_ui.open { 1.0 } else { 0.0 },
+            16.0,
+            dt,
+            0.003,
+        ) {
+            busy = true;
+        }
+
+        // 8. Recent Apps Switcher fade + horizontal card carousel glide
+        if smooth_to(
+            &mut self.recent_anim,
+            if self.recent_apps_open { 1.0 } else { 0.0 },
+            15.0,
+            dt,
+            0.003,
+        ) {
+            busy = true;
+        }
+        if self.recent_apps_open || self.recent_anim > 0.005 {
+            if smooth_to(
+                &mut self.recent_scroll_pos,
+                self.recent_selected as f32,
+                14.0,
+                dt,
+                0.004,
+            ) {
+                busy = true;
+            }
+        }
+
         busy
     }
 
@@ -1759,8 +1964,15 @@ impl LauncherUi {
         let unit = (sw / DESIGN_W).min(sh / DESIGN_H);
         let scene = self.current_scene();
 
-        // 1. Scenic background
-        if let Some(ref wp) = self.wallpaper_pm {
+        // 1. Scenic background (with smooth crossfade when switching scenes)
+        if self.scene_fade < 0.995 {
+            if let Some(ref prev_wp) = self.prev_wallpaper_pm {
+                draw_cover_pixmap_alpha(pm, prev_wp, 1.0);
+            }
+            if let Some(ref wp) = self.wallpaper_pm {
+                draw_cover_pixmap_alpha(pm, wp, ease_out_cubic(self.scene_fade));
+            }
+        } else if let Some(ref wp) = self.wallpaper_pm {
             draw_cover_pixmap(pm, wp);
         } else {
             pm.fill(Color::from_rgba8(14, 18, 32, 255));
@@ -1784,8 +1996,16 @@ impl LauncherUi {
             _ => {}
         }
 
-        // 3. Foreground mountain cutout overlapping lower clock digits
-        if let Some(ref fg) = self.foreground_pm {
+        // 3. Foreground mountain cutout overlapping lower clock digits (with crossfade)
+        if self.scene_fade < 0.995 {
+            let f = ease_out_cubic(self.scene_fade);
+            if let Some(ref prev_fg) = self.prev_foreground_pm {
+                draw_cover_pixmap_alpha(pm, prev_fg, 1.0 - f);
+            }
+            if let Some(ref fg) = self.foreground_pm {
+                draw_cover_pixmap_alpha(pm, fg, f);
+            }
+        } else if let Some(ref fg) = self.foreground_pm {
             draw_cover_pixmap(pm, fg);
         }
 
@@ -1851,35 +2071,35 @@ impl LauncherUi {
         // 6. Centered Floating Liquid Glass Squircle Dock + Floating Tooltip Pill
         self.draw_floating_dock(pm, sw, sh, unit);
 
-        // 7. Weather Card (when opened from top-right Weather pill)
-        if self.weather_popup_open {
+        // 7. Weather Card (smooth fade + glide)
+        if self.weather_popup_open || self.weather_anim > 0.005 {
             self.draw_weather_card(pm, sw, sh, unit, time_str, date_str);
         }
 
-        // 8. Exact Control Center Overlay (image_4f8f03.jpg)
-        if self.control_center_open {
+        // 8. Exact Control Center Overlay (smooth right-edge slide + fade)
+        if self.control_center_open || self.cc_anim > 0.005 {
             self.draw_control_center(pm, sw, sh, unit);
         }
 
-        // 9. Recent Apps Switcher Overlay (image_4f8f85.jpg)
-        if self.recent_apps_open {
+        // 9. Recent Apps Switcher Overlay (smooth fade + horizontal carousel glide)
+        if self.recent_apps_open || self.recent_anim > 0.005 {
             self.draw_recent_apps(pm, sw, sh, unit);
         }
 
-        // 10. Full Two-Pane Home Settings Screen
-        if self.settings.open {
+        // 10. Full Two-Pane Home Settings Screen (smooth fade + glide + dual gliding pills)
+        if self.settings.is_visible() {
             let rows = self.build_settings_rows(last_key_label, bound_count);
             self.settings
                 .draw(pm, self.glass_backdrop_pm.as_ref(), unit, &rows);
         }
 
-        // 11. App Long-Press Context Menu
-        if self.app_menu.open {
+        // 11. Compact Liquid Glass App Long-Press Menu (smooth slide-up + gliding pill)
+        if self.app_menu.open || self.app_menu_anim > 0.005 {
             self.draw_app_context_menu(pm, sw, sh, unit);
         }
 
-        // 12. Native In-Launcher Search Overlay
-        if self.search_ui.open {
+        // 12. Native In-Launcher Search Overlay (smooth fade + glide)
+        if self.search_ui.open || self.search_anim > 0.005 {
             self.draw_search_overlay(pm, sw, sh, unit);
         }
 
@@ -1917,6 +2137,9 @@ impl LauncherUi {
     ///   Do Not Disturb, Audio, Sleep Timer, Ambient Mode, Power Off)
     /// - Bottom row of 4 rounded squircles (Inputs, Button Mapper, Home Settings, Search)
     fn draw_control_center(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32) {
+        let a = self.cc_anim.clamp(0.0, 1.0);
+        let slide_x = ((1.0 - ease_out_cubic(a)) * 38.0 * unit).round();
+
         if let Some(ref glass) = self.glass_backdrop_pm {
             let sx = sw / glass.width() as f32;
             let sy = sh / glass.height() as f32;
@@ -1925,7 +2148,7 @@ impl LauncherUi {
                 glass.as_ref(),
                 SpreadMode::Pad,
                 FilterQuality::Bilinear,
-                1.0,
+                a,
                 Transform::from_scale(sx, sy),
             );
             if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
@@ -1933,18 +2156,17 @@ impl LauncherUi {
             }
         }
         let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(8, 10, 16, 175));
+        scrim.set_color(with_alpha(Color::from_rgba8(8, 10, 16, 175), a));
         if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
 
         let pill_w = (152.0 * unit).round();
         let pill_h = (52.0 * unit).round();
-        let pill_r = pill_h * 0.5;
         let col_gap = (12.0 * unit).round();
         let row_gap = (12.0 * unit).round();
         let grid_w = pill_w * 2.0 + col_gap;
-        let grid_x = (sw - 34.0 * unit - grid_w).round();
+        let grid_x = (sw - 34.0 * unit - grid_w + slide_x).round();
         let grid_y = (76.0 * unit).round();
 
         let ram_pct = if self.sys.ram_total_mb > 0 {
@@ -1991,27 +2213,33 @@ impl LauncherUi {
         for (i, (title, sub, glyph, tint_rgb)) in tiles.iter().enumerate() {
             let r = (i / 2) as f32;
             let c = (i % 2) as f32;
-            let x = grid_x + c * (pill_w + col_gap);
-            let y = grid_y + r * (pill_h + row_gap);
+            let sc = self.cc_tile_scales[i];
+            let pw = (pill_w * sc).round();
+            let ph = (pill_h * sc).round();
+            let x = grid_x + c * (pill_w + col_gap) - (pw - pill_w) * 0.5;
+            let y = grid_y + r * (pill_h + row_gap) - (ph - pill_h) * 0.5;
             let focused = self.cc_selected == i;
 
-            if let Some(pill) = rounded_rect_path(x, y, pill_w, pill_h, pill_r) {
+            if let Some(pill) = rounded_rect_path(x, y, pw, ph, ph * 0.5) {
                 let mut fill = Paint::default();
                 fill.anti_alias = true;
                 if focused {
-                    fill.set_color(Color::from_rgba8(245, 247, 250, 250));
+                    fill.set_color(with_alpha(Color::from_rgba8(245, 247, 250, 250), a));
                 } else {
-                    fill.set_color(Color::from_rgba8(24, 27, 36, 205));
+                    fill.set_color(with_alpha(Color::from_rgba8(24, 27, 36, 205), a));
                 }
                 pm.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
 
                 let mut rim = Paint::default();
                 rim.anti_alias = true;
-                rim.set_color(if focused {
-                    Color::from_rgba8(255, 255, 255, 255)
-                } else {
-                    Color::from_rgba8(255, 255, 255, 68)
-                });
+                rim.set_color(with_alpha(
+                    if focused {
+                        Color::from_rgba8(255, 255, 255, 255)
+                    } else {
+                        Color::from_rgba8(255, 255, 255, 68)
+                    },
+                    a,
+                ));
                 pm.stroke_path(
                     &pill,
                     &rim,
@@ -2027,26 +2255,35 @@ impl LauncherUi {
             // Left crisp vector glyph (Wi-Fi waves, Bluetooth rune, Memory chip, Moon, etc.)
             let g_size = (20.0 * unit).round();
             let gx = x + 15.0 * unit;
-            let gy = y + (pill_h - g_size) * 0.5;
-            let g_col = if let Some(rgb) = tint_rgb {
-                Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
-            } else if focused {
-                Color::from_rgba8(18, 22, 32, 250)
-            } else {
-                Color::from_rgba8(244, 246, 252, 245)
-            };
+            let gy = y + (ph - g_size) * 0.5;
+            let g_col = with_alpha(
+                if let Some(rgb) = tint_rgb {
+                    Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255)
+                } else if focused {
+                    Color::from_rgba8(18, 22, 32, 250)
+                } else {
+                    Color::from_rgba8(244, 246, 252, 245)
+                },
+                a,
+            );
             draw_glyph(pm, *glyph, gx, gy, g_size, g_col);
 
-            let title_col = if focused {
-                Color::from_rgba8(16, 18, 26, 255)
-            } else {
-                Color::from_rgba8(244, 246, 252, 245)
-            };
-            let sub_col = if focused {
-                Color::from_rgba8(64, 72, 88, 235)
-            } else {
-                Color::from_rgba8(178, 188, 206, 210)
-            };
+            let title_col = with_alpha(
+                if focused {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else {
+                    Color::from_rgba8(244, 246, 252, 245)
+                },
+                a,
+            );
+            let sub_col = with_alpha(
+                if focused {
+                    Color::from_rgba8(64, 72, 88, 235)
+                } else {
+                    Color::from_rgba8(178, 188, 206, 210)
+                },
+                a,
+            );
 
             let tx = (x + 42.0 * unit) as i32;
             draw_crisp_label(
@@ -2054,7 +2291,7 @@ impl LauncherUi {
                 self.font_medium.as_ref(),
                 title,
                 tx,
-                (y + pill_h * 0.45) as i32,
+                (y + ph * 0.45) as i32,
                 (11.8 * unit).round(),
                 title_col,
                 false,
@@ -2064,7 +2301,7 @@ impl LauncherUi {
                 self.font_regular.as_ref(),
                 sub,
                 tx,
-                (y + pill_h * 0.76) as i32,
+                (y + ph * 0.76) as i32,
                 (9.8 * unit).round(),
                 sub_col,
                 false,
@@ -2073,28 +2310,34 @@ impl LauncherUi {
             // Live RAM progress bar inside the Memory pill (tile index 2)
             if i == 2 {
                 let bar_x = x + 42.0 * unit;
-                let bar_y = y + pill_h - 8.5 * unit;
-                let bar_w = pill_w - 58.0 * unit;
+                let bar_y = y + ph - 8.5 * unit;
+                let bar_w = pw - 58.0 * unit;
                 let bar_h = (3.0 * unit).max(2.0);
                 if let Some(track) = rounded_rect_path(bar_x, bar_y, bar_w, bar_h, bar_h * 0.5) {
                     let mut tp = Paint::default();
                     tp.anti_alias = true;
-                    tp.set_color(if focused {
-                        Color::from_rgba8(0, 0, 0, 45)
-                    } else {
-                        Color::from_rgba8(255, 255, 255, 55)
-                    });
+                    tp.set_color(with_alpha(
+                        if focused {
+                            Color::from_rgba8(0, 0, 0, 45)
+                        } else {
+                            Color::from_rgba8(255, 255, 255, 55)
+                        },
+                        a,
+                    ));
                     pm.fill_path(&track, &tp, FillRule::Winding, Transform::identity(), None);
                 }
                 let fill_w = (bar_w * (ram_pct as f32 / 100.0)).max(6.0 * unit);
                 if let Some(fill_bar) = rounded_rect_path(bar_x, bar_y, fill_w, bar_h, bar_h * 0.5) {
                     let mut fp = Paint::default();
                     fp.anti_alias = true;
-                    fp.set_color(if focused {
-                        Color::from_rgba8(24, 28, 38, 235)
-                    } else {
-                        Color::from_rgba8(245, 247, 252, 240)
-                    });
+                    fp.set_color(with_alpha(
+                        if focused {
+                            Color::from_rgba8(24, 28, 38, 235)
+                        } else {
+                            Color::from_rgba8(245, 247, 252, 240)
+                        },
+                        a,
+                    ));
                     pm.fill_path(&fill_bar, &fp, FillRule::Winding, Transform::identity(), None);
                 }
             }
@@ -2108,25 +2351,31 @@ impl LauncherUi {
         let sq_glyphs = [Glyph::Input, Glyph::Remote, Glyph::Gear, Glyph::Search];
 
         for (b, glyph) in sq_glyphs.iter().enumerate() {
-            let x = grid_x + (b as f32) * (sq_size + sq_gap);
+            let sc = self.cc_tile_scales[8 + b];
+            let ssz = (sq_size * sc).round();
+            let x = grid_x + (b as f32) * (sq_size + sq_gap) - (ssz - sq_size) * 0.5;
+            let sy_b = sq_y - (ssz - sq_size) * 0.5;
             let focused = self.cc_selected == 8 + b;
-            if let Some(sq) = rounded_rect_path(x, sq_y, sq_size, sq_size, sq_r) {
+            if let Some(sq) = rounded_rect_path(x, sy_b, ssz, ssz, sq_r * sc) {
                 let mut fill = Paint::default();
                 fill.anti_alias = true;
                 if focused {
-                    fill.set_color(Color::from_rgba8(245, 247, 250, 250));
+                    fill.set_color(with_alpha(Color::from_rgba8(245, 247, 250, 250), a));
                 } else {
-                    fill.set_color(Color::from_rgba8(24, 27, 36, 205));
+                    fill.set_color(with_alpha(Color::from_rgba8(24, 27, 36, 205), a));
                 }
                 pm.fill_path(&sq, &fill, FillRule::Winding, Transform::identity(), None);
 
                 let mut rim = Paint::default();
                 rim.anti_alias = true;
-                rim.set_color(if focused {
-                    Color::from_rgba8(255, 255, 255, 255)
-                } else {
-                    Color::from_rgba8(255, 255, 255, 68)
-                });
+                rim.set_color(with_alpha(
+                    if focused {
+                        Color::from_rgba8(255, 255, 255, 255)
+                    } else {
+                        Color::from_rgba8(255, 255, 255, 68)
+                    },
+                    a,
+                ));
                 pm.stroke_path(
                     &sq,
                     &rim,
@@ -2140,13 +2389,16 @@ impl LauncherUi {
             }
 
             let g_size = (24.0 * unit).round();
-            let gx = x + (sq_size - g_size) * 0.5;
-            let gy = sq_y + (sq_size - g_size) * 0.5;
-            let g_col = if focused {
-                Color::from_rgba8(16, 18, 26, 255)
-            } else {
-                Color::from_rgba8(245, 247, 252, 245)
-            };
+            let gx = x + (ssz - g_size) * 0.5;
+            let gy = sy_b + (ssz - g_size) * 0.5;
+            let g_col = with_alpha(
+                if focused {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else {
+                    Color::from_rgba8(245, 247, 252, 245)
+                },
+                a,
+            );
             draw_glyph(pm, *glyph, gx, gy, g_size, g_col);
         }
     }
@@ -2212,19 +2464,21 @@ impl LauncherUi {
             false,
         );
 
-        // Horizontal app cards
+        // Horizontal app cards with smooth horizontal carousel glide
         let app_count = self.apps.len().saturating_sub(1);
         if app_count > 0 {
             let card_w = (410.0 * unit).round();
             let card_h = (232.0 * unit).round();
             let card_gap = (24.0 * unit).round();
             let center_x = ((sw - card_w) * 0.5).round();
-            let card_y = ((sh - card_h) * 0.54).round();
+            let slide_y = ((1.0 - ease_out_cubic(self.recent_anim)) * 24.0 * unit).round();
+            let card_y = ((sh - card_h) * 0.54 + slide_y).round();
+            let scroll_frac = self.recent_selected as f32 - self.recent_scroll_pos;
 
-            for offset in -1isize..=1isize {
+            for offset in -2isize..=2isize {
                 let idx = (self.recent_selected as isize + offset).rem_euclid(app_count as isize) as usize;
                 let Some(app) = self.apps.get(idx) else { continue };
-                let cx = center_x + (offset as f32) * (card_w + card_gap);
+                let cx = center_x + (offset as f32 + scroll_frac) * (card_w + card_gap);
                 if cx + card_w < 0.0 || cx > sw {
                     continue;
                 }
@@ -2302,13 +2556,15 @@ impl LauncherUi {
             (FocusZone::TopControlCenter, gear_x, "Control Center"),
         ];
 
-        for (zone, base_x, label) in items {
-            let focused = self.focus_zone == zone
+        for (idx, (zone, base_x, label)) in items.iter().enumerate() {
+            let focused = self.focus_zone == *zone
                 && !self.settings.open
                 && !self.control_center_open
                 && !self.recent_apps_open;
-            let size = if focused { (base_size * 1.10).round() } else { base_size };
-            let cx = base_x - (size - base_size) * 0.5;
+            let sc = self.top_scales[idx];
+            let tip_a = self.top_tip_alphas[idx];
+            let size = (base_size * sc).round();
+            let cx = *base_x - (size - base_size) * 0.5;
             let cy = top_y - (size - base_size) * 0.5;
 
             if let Some(circle) = rounded_rect_path(cx, cy, size, size, size * 0.5) {
@@ -2335,7 +2591,7 @@ impl LauncherUi {
                 let g_size = (19.0 * unit).round();
                 let gx = cx + (size - g_size) * 0.5;
                 let gy = cy + (size - g_size) * 0.5;
-                let top_glyph = if zone == FocusZone::TopWeather {
+                let top_glyph = if *zone == FocusZone::TopWeather {
                     Glyph::Cloud
                 } else {
                     Glyph::Sliders
@@ -2350,7 +2606,7 @@ impl LauncherUi {
                 );
             }
 
-            if focused {
+            if tip_a > 0.02 {
                 let tip_px = (11.0 * unit).round();
                 let tw = measure_label_width(self.font_medium.as_ref(), label, tip_px);
                 let pill_w = (tw + 18.0 * unit).round();
@@ -2362,7 +2618,7 @@ impl LauncherUi {
                 if let Some(tp) = rounded_rect_path(pill_x, pill_y, pill_w, pill_h, pill_h * 0.5) {
                     let mut fill = Paint::default();
                     fill.anti_alias = true;
-                    fill.set_color(Color::from_rgba8(24, 28, 38, 235));
+                    fill.set_color(with_alpha(Color::from_rgba8(24, 28, 38, 235), tip_a));
                     pm.fill_path(&tp, &fill, FillRule::Winding, Transform::identity(), None);
                 }
                 draw_crisp_label(
@@ -2372,7 +2628,7 @@ impl LauncherUi {
                     (pill_x + (pill_w - tw) * 0.5).round() as i32,
                     (pill_y + pill_h * 0.68).round() as i32,
                     tip_px,
-                    Color::from_rgba8(245, 247, 252, 250),
+                    with_alpha(Color::from_rgba8(245, 247, 252, 250), tip_a),
                     false,
                 );
             }
@@ -2380,10 +2636,12 @@ impl LauncherUi {
     }
 
     fn draw_weather_card(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32, time_str: &str, date_str: &str) {
+        let a = self.weather_anim.clamp(0.0, 1.0);
+        let slide_y = ((1.0 - ease_out_cubic(a)) * 18.0 * unit).round();
         let cw = (360.0 * unit).round();
         let ch = (165.0 * unit).round();
         let cx = ((sw - cw) * 0.5).round();
-        let cy = ((sh - ch) * 0.44).round();
+        let cy = ((sh - ch) * 0.44 + slide_y).round();
         if let Some(card) = rounded_rect_path(cx, cy, cw, ch, 22.0 * unit) {
             if let Some(ref glass) = self.glass_backdrop_pm {
                 let sx = sw / glass.width() as f32;
@@ -2394,19 +2652,19 @@ impl LauncherUi {
                     glass.as_ref(),
                     SpreadMode::Pad,
                     FilterQuality::Bilinear,
-                    0.95,
+                    0.95 * a,
                     Transform::from_scale(sx, sy),
                 );
                 pm.fill_path(&card, &gp, FillRule::Winding, Transform::identity(), None);
             }
             let mut bg = Paint::default();
             bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(20, 24, 36, 155));
+            bg.set_color(with_alpha(Color::from_rgba8(20, 24, 36, 155), a));
             pm.fill_path(&card, &bg, FillRule::Winding, Transform::identity(), None);
 
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(255, 255, 255, 105));
+            rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 105), a));
             let mut st = Stroke::default();
             st.width = (1.2 * unit).max(1.0);
             pm.stroke_path(&card, &rim, &st, Transform::identity(), None);
@@ -2512,35 +2770,47 @@ impl LauncherUi {
             if dock_has_focus && i == rel_sel {
                 continue;
             }
+            let abs_idx = self.page_offset + i;
+            let sc = *self.focus_scales.get(abs_idx).unwrap_or(&1.0);
             let ix = start_x + (i as f32) * (icon_size + icon_gap);
-            self.draw_squircle_icon(pm, app, ix, start_y, icon_size, icon_r, 1.0, false, unit);
+            self.draw_squircle_icon(pm, app, ix, start_y, icon_size, icon_r, sc, false, unit);
         }
 
         if dock_has_focus {
             if let Some(app) = visible.get(rel_sel) {
-                let sc = *self.focus_scales.get(self.selected_index).unwrap_or(&1.15);
+                let sc = *self.focus_scales.get(self.selected_index).unwrap_or(&1.16);
                 let ix = start_x + (rel_sel as f32) * (icon_size + icon_gap);
                 self.draw_squircle_icon(pm, app, ix, start_y, icon_size, icon_r, sc, true, unit);
+            }
+        }
 
+        if self.dock_tip_alpha > 0.02 {
+            if let Some(app) = visible.get(rel_sel) {
+                let tip_a = self.dock_tip_alpha.clamp(0.0, 1.0);
                 let tip_px = (11.5 * unit).round();
                 let text_w = measure_label_width(self.font_medium.as_ref(), &app.label, tip_px);
                 let tip_w = (text_w + 22.0 * unit).max(46.0 * unit).round();
                 let tip_h = (22.0 * unit).round();
-                let icon_center_x = ix + icon_size * 0.5;
+                let fallback_cx = start_x + (rel_sel as f32) * (icon_size + icon_gap) + icon_size * 0.5;
+                let icon_center_x = if self.dock_tip_x_u >= 0.0 {
+                    (self.dock_tip_x_u * unit) + (sw - DESIGN_W * unit) * 0.5
+                } else {
+                    fallback_cx
+                };
                 let tip_x = (icon_center_x - tip_w * 0.5)
                     .clamp(12.0 * unit, sw - tip_w - 12.0 * unit)
                     .round();
-                let tip_y = (dock_y - tip_h - 8.0 * unit).round();
+                let tip_y = (dock_y - tip_h - 8.0 * unit + (1.0 - ease_out_cubic(tip_a)) * 4.0 * unit).round();
 
                 if let Some(tip_path) = rounded_rect_path(tip_x, tip_y, tip_w, tip_h, 7.0 * unit) {
                     let mut fill = Paint::default();
                     fill.anti_alias = true;
-                    fill.set_color(Color::from_rgba8(26, 29, 38, 236));
+                    fill.set_color(with_alpha(Color::from_rgba8(26, 29, 38, 236), tip_a));
                     pm.fill_path(&tip_path, &fill, FillRule::Winding, Transform::identity(), None);
 
                     let mut rim = Paint::default();
                     rim.anti_alias = true;
-                    rim.set_color(Color::from_rgba8(255, 255, 255, 76));
+                    rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 76), tip_a));
                     let mut st = Stroke::default();
                     st.width = (1.0 * unit).max(1.0);
                     pm.stroke_path(&tip_path, &rim, &st, Transform::identity(), None);
@@ -2555,7 +2825,7 @@ impl LauncherUi {
                     lbl_x,
                     lbl_y,
                     tip_px,
-                    Color::from_rgba8(245, 246, 250, 250),
+                    with_alpha(Color::from_rgba8(245, 246, 250, 250), tip_a),
                     false,
                 );
             }
@@ -2578,7 +2848,8 @@ impl LauncherUi {
         let w = (size * scale).round();
         let h = w;
         let x = (base_x - (w - size) * 0.5).round();
-        let y = (base_y - (h - size) * 0.5 - if focused { 2.0 * unit } else { 0.0 }).round();
+        let lift = ((scale - 1.0) / 0.16).clamp(0.0, 1.25) * 3.2 * unit;
+        let y = (base_y - (h - size) * 0.5 - lift).round();
         let r = (radius * scale).round();
 
         if focused {
@@ -2653,6 +2924,7 @@ impl LauncherUi {
                 app_idx: self.selected_index,
                 selected: 0,
             };
+            self.app_menu_pill_idx = 0.0;
         }
     }
 
@@ -2736,15 +3008,19 @@ impl LauncherUi {
         let Some(app) = self.apps.get(self.app_menu.app_idx) else {
             return;
         };
+        let a = self.app_menu_anim.clamp(0.0, 1.0);
+        let slide_y = ((1.0 - ease_out_cubic(a)) * 22.0 * unit).round();
+
         let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(6, 8, 14, 96));
+        scrim.set_color(with_alpha(Color::from_rgba8(6, 8, 14, 96), a));
         if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
 
         let items = self.app_menu_items();
-        let (px, py, panel_w, panel_h, pad, header_h, row_h, row_gap) =
+        let (px, base_py, panel_w, panel_h, pad, header_h, row_h, row_gap) =
             self.app_menu_geometry(sw, sh, unit);
+        let py = base_py + slide_y;
         let card_r = (20.0 * unit).round();
 
         // Soft drop shadow beneath the floating Liquid Glass sheet
@@ -2757,7 +3033,7 @@ impl LauncherUi {
         ) {
             let mut sp = Paint::default();
             sp.anti_alias = true;
-            sp.set_color(Color::from_rgba8(0, 0, 0, 108));
+            sp.set_color(with_alpha(Color::from_rgba8(0, 0, 0, 108), a));
             pm.fill_path(&shadow, &sp, FillRule::Winding, Transform::identity(), None);
         }
 
@@ -2772,7 +3048,7 @@ impl LauncherUi {
                     glass.as_ref(),
                     SpreadMode::Pad,
                     FilterQuality::Bilinear,
-                    0.96,
+                    0.96 * a,
                     Transform::from_scale(sx, sy),
                 );
                 pm.fill_path(&card, &gp, FillRule::Winding, Transform::identity(), None);
@@ -2780,14 +3056,14 @@ impl LauncherUi {
 
             let mut frost = Paint::default();
             frost.anti_alias = true;
-            frost.set_color(Color::from_rgba8(20, 24, 36, 134));
+            frost.set_color(with_alpha(Color::from_rgba8(20, 24, 36, 134), a));
             pm.fill_path(&card, &frost, FillRule::Winding, Transform::identity(), None);
 
             if let Some(sheen) = LinearGradient::new(
                 Point::from_xy(px, py),
                 Point::from_xy(px, py + panel_h * 0.45),
                 vec![
-                    GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 34)),
+                    GradientStop::new(0.0, with_alpha(Color::from_rgba8(255, 255, 255, 34), a)),
                     GradientStop::new(1.0, Color::from_rgba8(255, 255, 255, 0)),
                 ],
                 SpreadMode::Pad,
@@ -2801,7 +3077,7 @@ impl LauncherUi {
 
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(255, 255, 255, 118));
+            rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 118), a));
             pm.stroke_path(
                 &card,
                 &rim,
@@ -2822,7 +3098,7 @@ impl LauncherUi {
             (px + pad + 8.0 * unit) as i32,
             (py + pad + 14.0 * unit) as i32,
             (13.0 * unit).round(),
-            Color::from_rgba8(255, 255, 255, 252),
+            with_alpha(Color::from_rgba8(255, 255, 255, 252), a),
             true,
         );
         let subtitle = if app.is_builtin {
@@ -2837,35 +3113,50 @@ impl LauncherUi {
             (px + pad + 8.0 * unit) as i32,
             (py + pad + 27.0 * unit) as i32,
             (9.2 * unit).round(),
-            Color::from_rgba8(190, 206, 232, 210),
+            with_alpha(Color::from_rgba8(190, 206, 232, 210), a),
             false,
         );
 
         let list_y = py + pad + header_h;
         let pill_w = panel_w - pad * 2.0;
         let pill_r = row_h * 0.5;
-        for (i, label) in items.iter().enumerate() {
+
+        // 1. Subtle frosted tracks for all items
+        for i in 0..items.len() {
             let ry = list_y + (i as f32) * (row_h + row_gap);
-            let focused = i == self.app_menu.selected;
             if let Some(pill) = rounded_rect_path(px + pad, ry, pill_w, row_h, pill_r) {
                 let mut fill = Paint::default();
                 fill.anti_alias = true;
-                fill.set_color(if focused {
-                    Color::from_rgba8(246, 248, 252, 248)
-                } else {
-                    Color::from_rgba8(255, 255, 255, 22)
-                });
+                fill.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 22), a));
                 pm.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
             }
-            let col = if focused {
-                Color::from_rgba8(16, 18, 26, 255)
-            } else if *label == "Uninstall" {
-                Color::from_rgba8(255, 118, 112, 245)
-            } else if *label == "Disable" {
-                Color::from_rgba8(255, 204, 96, 248)
-            } else {
-                Color::from_rgba8(245, 248, 254, 242)
-            };
+        }
+
+        // 2. Smoothly gliding white focus pill
+        let anim_hi_y = list_y + self.app_menu_pill_idx * (row_h + row_gap);
+        if let Some(hi_pill) = rounded_rect_path(px + pad, anim_hi_y, pill_w, row_h, pill_r) {
+            let mut fill = Paint::default();
+            fill.anti_alias = true;
+            fill.set_color(with_alpha(Color::from_rgba8(246, 248, 252, 250), a));
+            pm.fill_path(&hi_pill, &fill, FillRule::Winding, Transform::identity(), None);
+        }
+
+        // 3. Crisp row labels
+        for (i, label) in items.iter().enumerate() {
+            let ry = list_y + (i as f32) * (row_h + row_gap);
+            let focused = i == self.app_menu.selected;
+            let col = with_alpha(
+                if focused {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else if *label == "Uninstall" {
+                    Color::from_rgba8(255, 118, 112, 245)
+                } else if *label == "Disable" {
+                    Color::from_rgba8(255, 204, 96, 248)
+                } else {
+                    Color::from_rgba8(245, 248, 254, 242)
+                },
+                a,
+            );
             draw_crisp_label(
                 pm,
                 self.font_medium.as_ref(),
@@ -2880,6 +3171,9 @@ impl LauncherUi {
     }
 
     fn draw_search_overlay(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32) {
+        let a = self.search_anim.clamp(0.0, 1.0);
+        let slide_y = ((1.0 - ease_out_cubic(a)) * 18.0 * unit).round();
+
         if let Some(ref glass) = self.glass_backdrop_pm {
             let sx = sw / glass.width() as f32;
             let sy = sh / glass.height() as f32;
@@ -2888,7 +3182,7 @@ impl LauncherUi {
                 glass.as_ref(),
                 SpreadMode::Pad,
                 FilterQuality::Bilinear,
-                1.0,
+                a,
                 Transform::from_scale(sx, sy),
             );
             if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
@@ -2896,7 +3190,7 @@ impl LauncherUi {
             }
         }
         let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(10, 12, 18, 218));
+        scrim.set_color(with_alpha(Color::from_rgba8(10, 12, 18, 218), a));
         if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
@@ -2904,7 +3198,7 @@ impl LauncherUi {
         let margin = (48.0 * unit).round();
         let box_w = sw - margin * 2.0;
         let box_h = (42.0 * unit).round();
-        let box_y = (34.0 * unit).round();
+        let box_y = (34.0 * unit + slide_y).round();
 
         // Search input stadium pill
         if let Some(bar) = rounded_rect_path(margin, box_y, box_w, box_h, box_h * 0.5) {
@@ -3097,6 +3391,32 @@ impl LauncherUi {
             false,
         );
     }
+}
+
+fn draw_cover_pixmap_alpha(dst: &mut Pixmap, src: &Pixmap, opacity: f32) {
+    let op = opacity.clamp(0.0, 1.0);
+    if op <= 0.002 {
+        return;
+    }
+    let dw = dst.width() as f32;
+    let dh = dst.height() as f32;
+    let sw = src.width() as f32;
+    let sh = src.height() as f32;
+    let scale = (dw / sw).max(dh / sh);
+    let tx = (dw - sw * scale) * 0.5;
+    let ty = (dh - sh * scale) * 0.5;
+    dst.draw_pixmap(
+        0,
+        0,
+        src.as_ref(),
+        &PixmapPaint {
+            opacity: op,
+            quality: FilterQuality::Bilinear,
+            ..Default::default()
+        },
+        Transform::from_scale(scale, scale).post_translate(tx, ty),
+        None,
+    );
 }
 
 fn draw_cover_pixmap(dst: &mut Pixmap, src: &Pixmap) {

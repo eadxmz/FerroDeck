@@ -7,6 +7,7 @@
 //!   Step 4: Button Mapper & Voice Assistant Keybind
 //!   Step 5: Finish Setting Up (Easy Setup via ADB / Manual Permissions / Finish)
 
+use crate::anim::{ease_out_cubic, smooth_to, with_alpha};
 use crate::clock::{draw_crisp_label, measure_label_width};
 use crate::settings_pill::rounded_rect_path;
 use crate::ui::ALL_LANGUAGES;
@@ -40,6 +41,9 @@ pub struct SetupWizard {
     pub selected: usize,
     pub lang_region_global: bool,
     pub avatar_idx: usize,
+    pub step_anim: f32,
+    pub step_dir: f32,
+    pub pill_y_u: f32,
     font_display: Option<Font>,
     font_medium: Option<Font>,
     font_regular: Option<Font>,
@@ -57,6 +61,9 @@ impl SetupWizard {
             selected: 0,
             lang_region_global: false,
             avatar_idx: 0,
+            step_anim: 1.0,
+            step_dir: 1.0,
+            pill_y_u: -1.0,
             font_display: bold_bytes.and_then(|b| {
                 Font::from_bytes(
                     b,
@@ -94,12 +101,40 @@ impl SetupWizard {
         self.open = true;
         self.step = 0;
         self.selected = 0;
+        self.step_anim = 0.0;
+        self.step_dir = 1.0;
+        self.pill_y_u = -1.0;
     }
 
     pub fn open_at_step(&mut self, step: usize) {
         self.open = true;
         self.step = step.min(SETUP_TOTAL_STEPS - 1);
         self.selected = 0;
+        self.step_anim = 0.0;
+        self.step_dir = 1.0;
+        self.pill_y_u = -1.0;
+    }
+
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if !self.open {
+            return false;
+        }
+        let mut busy = smooth_to(&mut self.step_anim, 1.0, 12.0, dt, 0.003);
+        let list_top_u = if self.step == 1 { 192.0 } else { 146.0 };
+        let max_vis = 6usize;
+        let start_idx = if self.selected >= max_vis {
+            self.selected + 1 - max_vis
+        } else {
+            0
+        };
+        let vis_sel = self.selected.saturating_sub(start_idx);
+        let target_y_u = list_top_u + (vis_sel as f32) * 51.0;
+        if self.pill_y_u < 0.0 {
+            self.pill_y_u = target_y_u;
+        } else if smooth_to(&mut self.pill_y_u, target_y_u, 22.0, dt, 0.12) {
+            busy = true;
+        }
+        busy
     }
 
     pub fn step_header(&self) -> (&'static str, &'static str) {
@@ -313,6 +348,9 @@ impl SetupWizard {
         if self.step + 1 < SETUP_TOTAL_STEPS {
             self.step += 1;
             self.selected = 0;
+            self.step_anim = 0.0;
+            self.step_dir = 1.0;
+            self.pill_y_u = -1.0;
         } else {
             self.open = false;
         }
@@ -322,6 +360,9 @@ impl SetupWizard {
         if self.step > 0 {
             self.step -= 1;
             self.selected = 0;
+            self.step_anim = 0.0;
+            self.step_dir = -1.0;
+            self.pill_y_u = -1.0;
         }
     }
 
@@ -492,9 +533,13 @@ impl SetupWizard {
             list_top = (192.0 * unit).round();
         }
 
-        // 5. Centered Frosted Pill Option Stack
+        // 5. Centered Frosted Pill Option Stack with smooth step slide & gliding white focus pill
+        let eased_step = ease_out_cubic(self.step_anim);
+        let slide_x = ((1.0 - eased_step) * 34.0 * unit * self.step_dir).round();
+        let step_alpha = (0.25 + 0.75 * eased_step).clamp(0.0, 1.0);
+
         let card_w = (460.0 * unit).round();
-        let card_x = ((sw - card_w) * 0.5).round();
+        let card_x = ((sw - card_w) * 0.5 + slide_x).round();
         let row_h = (42.0 * unit).round();
         let row_gap = (9.0 * unit).round();
         let row_r = (13.0 * unit).round();
@@ -507,13 +552,11 @@ impl SetupWizard {
         };
         let visible = &options[start_idx..(start_idx + max_vis).min(options.len())];
 
-        for (vis_i, opt) in visible.iter().enumerate() {
-            let abs_i = start_idx + vis_i;
+        // 5a. Draw dark frosted row tracks first
+        for vis_i in 0..visible.len() {
             let ry = list_top + (vis_i as f32) * (row_h + row_gap);
-            let focused = abs_i == self.selected;
-
             if let Some(pill) = rounded_rect_path(card_x, ry, card_w, row_h, row_r) {
-                if !focused && self.step >= 2 {
+                if self.step >= 2 {
                     if let Some(glass) = glass_bg {
                         let sx = sw / glass.width() as f32;
                         let sy = sh / glass.height() as f32;
@@ -523,7 +566,7 @@ impl SetupWizard {
                             glass.as_ref(),
                             SpreadMode::Pad,
                             FilterQuality::Bilinear,
-                            0.85,
+                            0.85 * step_alpha,
                             Transform::from_scale(sx, sy),
                         );
                         pm.fill_path(&pill, &gp, FillRule::Winding, Transform::identity(), None);
@@ -531,29 +574,44 @@ impl SetupWizard {
                 }
                 let mut fill = Paint::default();
                 fill.anti_alias = true;
-                fill.set_color(if focused {
-                    Color::from_rgba8(245, 247, 250, 252)
-                } else {
-                    Color::from_rgba8(30, 33, 42, 195)
-                });
+                fill.set_color(with_alpha(Color::from_rgba8(30, 33, 42, 195), step_alpha));
                 pm.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
 
-                if !focused {
-                    let mut rim = Paint::default();
-                    rim.anti_alias = true;
-                    rim.set_color(Color::from_rgba8(255, 255, 255, 38));
-                    pm.stroke_path(
-                        &pill,
-                        &rim,
-                        &Stroke {
-                            width: 1.0,
-                            ..Default::default()
-                        },
-                        Transform::identity(),
-                        None,
-                    );
-                }
+                let mut rim = Paint::default();
+                rim.anti_alias = true;
+                rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 38), step_alpha));
+                pm.stroke_path(
+                    &pill,
+                    &rim,
+                    &Stroke {
+                        width: 1.0,
+                        ..Default::default()
+                    },
+                    Transform::identity(),
+                    None,
+                );
             }
+        }
+
+        // 5b. Draw smooth gliding white active pill
+        let fallback_y = list_top + (self.selected.saturating_sub(start_idx) as f32) * (row_h + row_gap);
+        let hi_y = if self.pill_y_u >= 0.0 {
+            (self.pill_y_u * unit).round()
+        } else {
+            fallback_y
+        };
+        if let Some(hi_pill) = rounded_rect_path(card_x, hi_y, card_w, row_h, row_r) {
+            let mut fill = Paint::default();
+            fill.anti_alias = true;
+            fill.set_color(with_alpha(Color::from_rgba8(245, 247, 250, 252), step_alpha));
+            pm.fill_path(&hi_pill, &fill, FillRule::Winding, Transform::identity(), None);
+        }
+
+        // 5c. Draw crisp labels & checkmarks
+        for (vis_i, opt) in visible.iter().enumerate() {
+            let abs_i = start_idx + vis_i;
+            let ry = list_top + (vis_i as f32) * (row_h + row_gap);
+            let focused = abs_i == self.selected;
 
             let tcol = if focused {
                 Color::from_rgba8(14, 16, 22, 255)

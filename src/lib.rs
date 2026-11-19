@@ -1,5 +1,6 @@
 //! FerroDeck — Event-driven Rust NativeActivity TV Launcher (`android-activity` 0.6).
 
+mod anim;
 mod clock;
 mod glyphs;
 mod input;
@@ -60,6 +61,7 @@ struct SharedState {
     ok_pressed_at: Option<Instant>,
     ok_long_fired: bool,
     pending_calls: Vec<PendingJavaCall>,
+    last_frame_at: Option<Instant>,
     scene_dirty: bool,
     needs_redraw: bool,
 }
@@ -83,6 +85,7 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         ok_pressed_at: None,
         ok_long_fired: false,
         pending_calls: Vec::new(),
+        last_frame_at: None,
         scene_dirty: true,
         needs_redraw: true,
     })
@@ -264,7 +267,13 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
         None => return false,
     };
 
-    let animating = st.ui.tick_animations();
+    let now = Instant::now();
+    let dt = st
+        .last_frame_at
+        .map(|prev| prev.elapsed().as_secs_f32().clamp(0.004, 0.045))
+        .unwrap_or(1.0 / 60.0);
+    let animating = st.ui.tick_animations(dt);
+    st.last_frame_at = if animating { Some(now) } else { None };
     let (time_str, greeting_str, date_str) =
         format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name, st.ui.clock_24h, st.ui.lang_code);
     let key_label = st.mapper.voice_key_label.clone();

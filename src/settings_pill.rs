@@ -1,5 +1,6 @@
-//! Full-Screen Two-Pane Home Settings with Inline Section Headers (`NATIVE (INDIA)` vs `GLOBAL`).
+//! Full-Screen Two-Pane Home Settings with Fluid Open/Close Transitions & Dual Gliding Pills.
 
+use crate::anim::{ease_out_cubic, smooth_to, with_alpha};
 use crate::clock::{draw_crisp_label, measure_label_width};
 use crate::glyphs::{draw_glyph, Glyph};
 use fontdue::{Font, FontSettings};
@@ -75,11 +76,14 @@ pub struct VisibleRowLayout {
 
 pub struct HomeSettingsScreen {
     pub open: bool,
+    pub open_anim: f32,
     pub category_idx: usize,
     pub row_idx: usize,
     pub in_right_pane: bool,
     pub status_banner: Option<String>,
     pub side_pill_y_u: f32,
+    pub right_pill_y_u: f32,
+    pub right_pill_target_u: f32,
     font_display: Option<Font>,
     font_medium: Option<Font>,
     font_regular: Option<Font>,
@@ -93,11 +97,14 @@ impl HomeSettingsScreen {
     ) -> Self {
         Self {
             open: false,
+            open_anim: 0.0,
             category_idx: 0,
             row_idx: 0,
             in_right_pane: false,
             status_banner: None,
             side_pill_y_u: -1.0,
+            right_pill_y_u: -1.0,
+            right_pill_target_u: -1.0,
             font_display: bold_bytes.and_then(|b| {
                 Font::from_bytes(
                     b,
@@ -137,7 +144,13 @@ impl HomeSettingsScreen {
         self.row_idx = 0;
         self.in_right_pane = false;
         self.status_banner = None;
-        self.side_pill_y_u = -1.0;
+        self.side_pill_y_u = 74.0 + (self.category_idx as f32) * 35.0;
+        self.right_pill_y_u = -1.0;
+        self.right_pill_target_u = -1.0;
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.open || self.open_anim > 0.005
     }
 
     pub fn current_category(&self) -> SettingsCategory {
@@ -161,6 +174,7 @@ impl HomeSettingsScreen {
                 self.category_idx - 1
             };
             self.row_idx = 0;
+            self.right_pill_y_u = -1.0;
         }
     }
 
@@ -173,6 +187,7 @@ impl HomeSettingsScreen {
             let n = SettingsCategory::ALL.len();
             self.category_idx = (self.category_idx + 1) % n;
             self.row_idx = 0;
+            self.right_pill_y_u = -1.0;
         }
     }
 
@@ -180,6 +195,7 @@ impl HomeSettingsScreen {
         if !self.in_right_pane && row_count > 0 {
             self.in_right_pane = true;
             self.row_idx = self.row_idx.min(row_count - 1);
+            self.right_pill_y_u = -1.0;
         }
     }
 
@@ -189,24 +205,33 @@ impl HomeSettingsScreen {
         }
     }
 
-    pub fn tick(&mut self) -> bool {
-        if !self.open {
-            return false;
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let mut busy = smooth_to(
+            &mut self.open_anim,
+            if self.open { 1.0 } else { 0.0 },
+            15.0,
+            dt,
+            0.003,
+        );
+        if !self.is_visible() {
+            return busy;
         }
+
         let target_side_u = 74.0 + (self.category_idx as f32) * 35.0;
         if self.side_pill_y_u < 0.0 {
             self.side_pill_y_u = target_side_u;
-            false
-        } else {
-            let d = target_side_u - self.side_pill_y_u;
-            if d.abs() > 0.15 {
-                self.side_pill_y_u += d * 0.42;
-                true
-            } else {
-                self.side_pill_y_u = target_side_u;
-                false
+        } else if smooth_to(&mut self.side_pill_y_u, target_side_u, 22.0, dt, 0.12) {
+            busy = true;
+        }
+
+        if self.in_right_pane && self.right_pill_target_u >= 0.0 {
+            if self.right_pill_y_u < 0.0 {
+                self.right_pill_y_u = self.right_pill_target_u;
+            } else if smooth_to(&mut self.right_pill_y_u, self.right_pill_target_u, 22.0, dt, 0.12) {
+                busy = true;
             }
         }
+        busy
     }
 
     /// Computes exact vertical layout for visible rows including inline section headers
@@ -261,12 +286,13 @@ impl HomeSettingsScreen {
         unit: f32,
         rows: &[SettingRowItem],
     ) {
-        if !self.open {
+        if !self.is_visible() {
             return;
         }
         let sw = pm.width() as f32;
         let sh = pm.height() as f32;
-        let _ = self.tick();
+        let a = self.open_anim.clamp(0.0, 1.0);
+        let slide_y = ((1.0 - ease_out_cubic(a)) * 16.0 * unit).round();
 
         if let Some(glass) = glass_bg {
             let sx = sw / glass.width() as f32;
@@ -276,7 +302,7 @@ impl HomeSettingsScreen {
                 glass.as_ref(),
                 SpreadMode::Pad,
                 FilterQuality::Bilinear,
-                1.0,
+                a,
                 Transform::from_scale(sx, sy),
             );
             if let Some(r) = Rect::from_xywh(0.0, 0.0, sw, sh) {
@@ -284,7 +310,7 @@ impl HomeSettingsScreen {
             }
         }
         let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(10, 11, 18, 206));
+        scrim.set_color(with_alpha(Color::from_rgba8(10, 11, 18, 206), a));
         if let Some(r) = Rect::from_xywh(0.0, 0.0, sw, sh) {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
@@ -297,37 +323,41 @@ impl HomeSettingsScreen {
             self.font_display.as_ref(),
             "Home settings",
             (side_x + 14.0 * unit) as i32,
-            (54.0 * unit) as i32,
+            (54.0 * unit + slide_y) as i32,
             (22.0 * unit).round(),
-            Color::from_rgba8(255, 255, 255, 250),
+            with_alpha(Color::from_rgba8(255, 255, 255, 250), a),
             false,
         );
 
         let pill_h = (31.0 * unit).round();
         let pill_r = pill_h * 0.5;
-        let anim_side_y = (self.side_pill_y_u * unit).round();
+        let anim_side_y = (self.side_pill_y_u * unit + slide_y).round();
 
         if let Some(sp) = rounded_rect_path(side_x, anim_side_y, side_w, pill_h, pill_r) {
             let mut fill = Paint::default();
             fill.anti_alias = true;
-            if !self.in_right_pane {
-                fill.set_color(Color::from_rgba8(245, 247, 250, 248));
+            let col = if !self.in_right_pane {
+                Color::from_rgba8(245, 247, 250, 248)
             } else {
-                fill.set_color(Color::from_rgba8(255, 255, 255, 34));
-            }
+                Color::from_rgba8(255, 255, 255, 34)
+            };
+            fill.set_color(with_alpha(col, a));
             pm.fill_path(&sp, &fill, FillRule::Winding, Transform::identity(), None);
         }
 
         for (i, cat) in SettingsCategory::ALL.iter().enumerate() {
-            let ry = ((74.0 + (i as f32) * 35.0) * unit).round();
+            let ry = ((74.0 + (i as f32) * 35.0) * unit + slide_y).round();
             let is_active = i == self.category_idx;
-            let text_col = if is_active && !self.in_right_pane {
-                Color::from_rgba8(16, 18, 26, 255)
-            } else if is_active {
-                Color::from_rgba8(255, 255, 255, 255)
-            } else {
-                Color::from_rgba8(220, 226, 238, 215)
-            };
+            let text_col = with_alpha(
+                if is_active && !self.in_right_pane {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else if is_active {
+                    Color::from_rgba8(255, 255, 255, 255)
+                } else {
+                    Color::from_rgba8(220, 226, 238, 215)
+                },
+                a,
+            );
 
             let glyph = match cat {
                 SettingsCategory::Appearance => Glyph::Scene,
@@ -369,75 +399,108 @@ impl HomeSettingsScreen {
             self.font_display.as_ref(),
             active_cat.title(),
             (main_x + 12.0 * unit) as i32,
-            (54.0 * unit) as i32,
+            (54.0 * unit + slide_y) as i32,
             (19.0 * unit).round(),
-            Color::from_rgba8(255, 255, 255, 248),
+            with_alpha(Color::from_rgba8(255, 255, 255, 248), a),
             false,
         );
 
         let layouts = self.compute_visible_layout(rows, unit);
+
+        // Update gliding right-pane focus pill target in design units
+        if self.in_right_pane {
+            if let Some(foc_lay) = layouts.iter().find(|l| l.abs_idx == self.row_idx) {
+                let target_u = foc_lay.pill_y / unit.max(0.01);
+                self.right_pill_target_u = target_u;
+                if self.right_pill_y_u < 0.0 {
+                    self.right_pill_y_u = target_u;
+                }
+            }
+        }
+
+        // 1. Draw all unfocused frosted row tracks & section headers first
         for lay in &layouts {
-            let item = &rows[lay.abs_idx];
             if let Some(sec_title) = lay.header {
                 draw_crisp_label(
                     pm,
                     self.font_medium.as_ref(),
                     sec_title,
                     (main_x + 14.0 * unit) as i32,
-                    lay.header_y as i32,
+                    (lay.header_y + slide_y) as i32,
                     (9.8 * unit).round(),
-                    Color::from_rgba8(165, 205, 245, 215),
+                    with_alpha(Color::from_rgba8(165, 205, 245, 215), a),
                     false,
                 );
             }
 
-            let ry = lay.pill_y;
+            let ry = lay.pill_y + slide_y;
             let row_h = lay.pill_h;
             let row_r = row_h * 0.5;
-            let is_focused = self.in_right_pane && lay.abs_idx == self.row_idx;
-
             if let Some(pill) = rounded_rect_path(main_x, ry, main_w, row_h, row_r) {
                 let mut fill = Paint::default();
                 fill.anti_alias = true;
-                if is_focused {
-                    fill.set_color(Color::from_rgba8(245, 247, 250, 248));
-                } else {
-                    fill.set_color(Color::from_rgba8(255, 255, 255, 18));
-                }
+                fill.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 18), a));
                 pm.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
 
-                if !is_focused {
-                    let mut rim = Paint::default();
-                    rim.anti_alias = true;
-                    rim.set_color(Color::from_rgba8(255, 255, 255, 26));
-                    pm.stroke_path(
-                        &pill,
-                        &rim,
-                        &Stroke {
-                            width: 1.0,
-                            ..Default::default()
-                        },
-                        Transform::identity(),
-                        None,
-                    );
-                }
+                let mut rim = Paint::default();
+                rim.anti_alias = true;
+                rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 26), a));
+                pm.stroke_path(
+                    &pill,
+                    &rim,
+                    &Stroke {
+                        width: 1.0,
+                        ..Default::default()
+                    },
+                    Transform::identity(),
+                    None,
+                );
             }
+        }
 
-            let title_col = if is_focused {
-                Color::from_rgba8(16, 18, 26, 255)
-            } else {
-                Color::from_rgba8(242, 245, 252, 242)
-            };
-            let sub_col = if is_focused {
-                Color::from_rgba8(68, 76, 94, 235)
-            } else {
-                Color::from_rgba8(172, 184, 204, 210)
-            };
-            let val_col = if is_focused {
-                Color::from_rgba8(24, 28, 38, 245)
-            } else {
-                Color::from_rgba8(210, 222, 240, 220)
-            };
+        // 2. Draw smooth gliding white active pill in right pane
+        if self.in_right_pane && self.right_pill_y_u >= 0.0 {
+            let row_h = (38.0 * unit).round();
+            let anim_ry = (self.right_pill_y_u * unit + slide_y).round();
+            if let Some(hi_pill) = rounded_rect_path(main_x, anim_ry, main_w, row_h, row_h * 0.5) {
+                let mut fill = Paint::default();
+                fill.anti_alias = true;
+                fill.set_color(with_alpha(Color::from_rgba8(245, 247, 250, 250), a));
+                pm.fill_path(&hi_pill, &fill, FillRule::Winding, Transform::identity(), None);
+            }
+        }
+
+        // 3. Draw crisp row labels & values on top of the gliding pill
+        for lay in &layouts {
+            let item = &rows[lay.abs_idx];
+            let ry = lay.pill_y + slide_y;
+            let row_h = lay.pill_h;
+            let is_focused = self.in_right_pane && lay.abs_idx == self.row_idx;
+
+            let title_col = with_alpha(
+                if is_focused {
+                    Color::from_rgba8(16, 18, 26, 255)
+                } else {
+                    Color::from_rgba8(242, 245, 252, 242)
+                },
+                a,
+            );
+            let sub_col = with_alpha(
+                if is_focused {
+                    Color::from_rgba8(68, 76, 94, 235)
+                } else {
+                    Color::from_rgba8(172, 184, 204, 210)
+                },
+                a,
+            );
+            let val_col = with_alpha(
+                if is_focused {
+                    Color::from_rgba8(24, 28, 38, 245)
+                } else {
+                    Color::from_rgba8(210, 222, 240, 220)
+                },
+                a,
+            );
 
             let pad_x = (18.0 * unit).round();
             if let Some(ref sub) = item.subtitle {
@@ -482,7 +545,7 @@ impl HomeSettingsScreen {
                     (main_x + main_w - 28.0 * unit) as i32,
                     (ry + row_h * 0.66) as i32,
                     (13.5 * unit).round(),
-                    Color::from_rgba8(46, 204, 113, 255),
+                    with_alpha(Color::from_rgba8(46, 204, 113, 255), a),
                     false,
                 );
             } else if !item.value.is_empty() {
@@ -507,11 +570,11 @@ impl HomeSettingsScreen {
             let box_w = (mw + 24.0 * unit).min(main_w).round();
             let box_h = (22.0 * unit).round();
             let bx = main_x + 10.0 * unit;
-            let by = (sh - 56.0 * unit).round();
+            let by = (sh - 56.0 * unit + slide_y).round();
             if let Some(bp) = rounded_rect_path(bx, by, box_w, box_h, box_h * 0.5) {
                 let mut bg = Paint::default();
                 bg.anti_alias = true;
-                bg.set_color(Color::from_rgba8(22, 28, 42, 232));
+                bg.set_color(with_alpha(Color::from_rgba8(22, 28, 42, 232), a));
                 pm.fill_path(&bp, &bg, FillRule::Winding, Transform::identity(), None);
             }
             draw_crisp_label(
@@ -521,7 +584,7 @@ impl HomeSettingsScreen {
                 (bx + 12.0 * unit) as i32,
                 (by + box_h * 0.68) as i32,
                 mpx,
-                Color::from_rgba8(143, 211, 255, 250),
+                with_alpha(Color::from_rgba8(143, 211, 255, 250), a),
                 false,
             );
         }
@@ -536,16 +599,16 @@ impl HomeSettingsScreen {
         let pill_hint_w = (hw + 28.0 * unit).round();
         let pill_hint_h = (23.0 * unit).round();
         let hx = (main_x + 10.0 * unit).round();
-        let hy = (sh - 30.0 * unit).round();
+        let hy = (sh - 30.0 * unit + slide_y).round();
         if let Some(hp) = rounded_rect_path(hx, hy, pill_hint_w, pill_hint_h, pill_hint_h * 0.5) {
             let mut bg = Paint::default();
             bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(24, 25, 36, 224));
+            bg.set_color(with_alpha(Color::from_rgba8(24, 25, 36, 224), a));
             pm.fill_path(&hp, &bg, FillRule::Winding, Transform::identity(), None);
 
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(255, 255, 255, 42));
+            rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 42), a));
             pm.stroke_path(
                 &hp,
                 &rim,
@@ -564,7 +627,7 @@ impl HomeSettingsScreen {
             (hx + 14.0 * unit) as i32,
             (hy + pill_hint_h * 0.67) as i32,
             hpx,
-            Color::from_rgba8(225, 230, 240, 215),
+            with_alpha(Color::from_rgba8(225, 230, 240, 215), a),
             false,
         );
     }
