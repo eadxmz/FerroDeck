@@ -49,7 +49,19 @@ public class RemoteFilterService extends AccessibilityService {
         }
 
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-            // Check if user configured a custom Voice Assistant keybind
+            boolean isReserved = kc == KeyEvent.KEYCODE_DPAD_CENTER
+                    || kc == KeyEvent.KEYCODE_ENTER
+                    || kc == KeyEvent.KEYCODE_BACK
+                    || kc == KeyEvent.KEYCODE_HOME;
+
+            // While capturing a new keybind in FerroDeck, forward ANY non-nav remote key immediately
+            if (MainActivity.isKeyCaptureActive && !isReserved) {
+                try {
+                    MainActivity.nativeOnRemoteKey(kc, sc);
+                } catch (Throwable ignored) { }
+                return true;
+            }
+
             SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
             int customVoiceKc = sp.getInt("voice_key_code", -1);
             int customVoiceSc = sp.getInt("voice_scan_code", -1);
@@ -62,13 +74,6 @@ public class RemoteFilterService extends AccessibilityService {
                     || kc == KeyEvent.KEYCODE_PROG_YELLOW;
 
             if (matchesCustomVoice || isDefaultVoiceKey) {
-                // If user is currently capturing a keybind inside FerroDeck settings, forward raw key
-                if (MainActivity.isKeyCaptureActive) {
-                    try {
-                        MainActivity.nativeOnRemoteKey(kc, sc);
-                    } catch (Throwable ignored) { }
-                    return true;
-                }
                 VoiceAssistant.startListening(this);
                 return true;
             }

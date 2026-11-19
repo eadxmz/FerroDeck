@@ -86,6 +86,8 @@ public class MainActivity extends NativeActivity {
             boolean weatherAuto,
             String weatherCity);
     public static native void nativeUpdateWeather(String city, String tempText, String descText);
+    public static native void nativeSetBackgroundApps(String[] packages, boolean[] runningFlags);
+    public static native void nativeLoadKeybinds(int voiceKc, int voiceSc, int ccKc, int ccSc);
     public static native void nativeUpdateSystemStatus(
             String wifiLabel,
             boolean btOn,
@@ -104,6 +106,7 @@ public class MainActivity extends NativeActivity {
         activeInstance = this;
         resetTvFocusLock();
         loadAndPushSavedPrefs();
+        loadSavedKeybinds();
         refreshInstalledApps();
         refreshSystemSnapshot();
         handleSpecialIntent(getIntent());
@@ -167,17 +170,48 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    private static boolean isNavOrSystemKey(int kc) {
+        return kc == KeyEvent.KEYCODE_DPAD_UP
+                || kc == KeyEvent.KEYCODE_DPAD_DOWN
+                || kc == KeyEvent.KEYCODE_DPAD_LEFT
+                || kc == KeyEvent.KEYCODE_DPAD_RIGHT
+                || kc == KeyEvent.KEYCODE_DPAD_CENTER
+                || kc == KeyEvent.KEYCODE_ENTER
+                || kc == KeyEvent.KEYCODE_BACK
+                || kc == KeyEvent.KEYCODE_HOME;
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
             int kc = event.getKeyCode();
             int sc = event.getScanCode();
 
+            // During keybind capture, intercept ANY non-navigation remote/keyboard key immediately!
+            if (isKeyCaptureActive && !isNavOrSystemKey(kc)) {
+                try {
+                    nativeOnRemoteKey(kc, sc);
+                } catch (Throwable ignored) { }
+                return true;
+            }
+
             SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
             int customVoiceKc = sp.getInt("voice_key_code", -1);
             int customVoiceSc = sp.getInt("voice_scan_code", -1);
             boolean matchesCustomVoice = (customVoiceKc > 0 && kc == customVoiceKc)
                     || (customVoiceSc > 0 && sc == customVoiceSc);
+
+            int customCcKc = sp.getInt("cc_key_code", -1);
+            int customCcSc = sp.getInt("cc_scan_code", -1);
+            boolean matchesCustomCc = (customCcKc > 0 && kc == customCcKc)
+                    || (customCcSc > 0 && sc == customCcSc);
+
+            if (!isKeyCaptureActive && matchesCustomCc) {
+                try {
+                    nativeOnRemoteKey(kc, sc);
+                } catch (Throwable ignored) { }
+                return true;
+            }
 
             if (!isKeyCaptureActive && (matchesCustomVoice
                     || (kc == KeyEvent.KEYCODE_UNKNOWN && sc > 0)
@@ -215,56 +249,31 @@ public class MainActivity extends NativeActivity {
      * (e.g. YouTube, Chrome, TikTok, Instagram, WhatsApp, Messenger, 2048, Get apps, etc.) —
      * are allowed in the dock and tagged with `isBuiltin = true` so their menu shows "Disable".
      */
+    /**
+     * Dedicated-icon dock filtering:
+     * Real Android apps like Gallery, Clock, Calendar, Calculator, Camera, Files, etc. are
+     * ALLOWED whenever they provide a dedicated launcher icon (iconless & default-robot apps
+     * are filtered in `refreshInstalledApps`). Only duplicate Settings and non-app OS plumbing
+     * (other launchers, SystemUI, SetupWizard, keyboards/IMEs, package installers, Traceur)
+     * are excluded here.
+     */
     private static boolean isSystemUtilityPackage(String pkg) {
         if (pkg == null || pkg.isEmpty()) return true;
         String p = pkg.toLowerCase(java.util.Locale.ROOT);
-        if (p.equals("android")
+        return p.equals("android")
                 || p.equals("com.android.settings")
                 || p.equals("com.android.tv.settings")
                 || p.equals("com.android.systemui")
-                || p.equals("com.android.documentsui")
-                || p.equals("com.google.android.documentsui")
-                || p.equals("com.android.dialer")
-                || p.equals("com.google.android.dialer")
-                || p.equals("com.android.contacts")
-                || p.equals("com.google.android.contacts")
-                || p.equals("com.android.messaging")
-                || p.equals("com.android.mms")
-                || p.equals("com.android.deskclock")
-                || p.equals("com.android.calculator2")
-                || p.equals("com.android.calendar")
-                || p.equals("com.android.gallery3d")
-                || p.equals("com.android.camera")
-                || p.equals("com.android.camera2")
                 || p.equals("org.chromium.webview_shell")
-                || p.equals("com.android.webview")
-                || p.equals("com.google.android.webview")
-                || p.contains(".settings")
                 || p.contains("launcher")
                 || p.contains("systemui")
                 || p.contains("setupwizard")
-                || p.contains("provider")
                 || p.contains("inputmethod")
                 || p.contains("keyboard")
                 || p.contains("permissioncontroller")
                 || p.contains("packageinstaller")
                 || p.contains("traceur")
-                || p.startsWith("com.android.cts")
-                || p.startsWith("com.google.android.gms")
-                || p.startsWith("com.google.android.gsf")
-                || p.startsWith("com.google.android.tts")
-                || p.startsWith("com.google.android.katniss")
-                || p.startsWith("com.google.android.backdrop")
-                || p.startsWith("com.amlogic.")
-                || p.startsWith("com.droidlogic.")
-                || p.startsWith("com.mediatek.")
-                || p.startsWith("com.realtek.")
-                || p.startsWith("com.rockchip.")
-                || p.startsWith("com.qualcomm.")
-                || p.startsWith("com.hisilicon.")) {
-            return true;
-        }
-        return false;
+                || p.startsWith("com.android.cts");
     }
 
     public void refreshInstalledApps() {
@@ -843,11 +852,38 @@ public class MainActivity extends NativeActivity {
                 .edit().putString("dock_order", csvPackages).apply();
     }
 
+    private void loadSavedKeybinds() {
+        SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
+        int vkc = sp.getInt("voice_key_code", -1);
+        int vsc = sp.getInt("voice_scan_code", -1);
+        int cckc = sp.getInt("cc_key_code", -1);
+        int ccsc = sp.getInt("cc_scan_code", -1);
+        nativeLoadKeybinds(vkc, vsc, cckc, ccsc);
+    }
+
     public void saveVoiceKeybindFromRust(int keyCode, int scanCode) {
         getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
                 .edit()
                 .putInt("voice_key_code", keyCode)
                 .putInt("voice_scan_code", scanCode)
+                .apply();
+    }
+
+    public void saveCcKeybindFromRust(int keyCode, int scanCode) {
+        getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
+                .edit()
+                .putInt("cc_key_code", keyCode)
+                .putInt("cc_scan_code", scanCode)
+                .apply();
+    }
+
+    public void resetKeybindsFromRust() {
+        getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
+                .edit()
+                .remove("voice_key_code")
+                .remove("voice_scan_code")
+                .remove("cc_key_code")
+                .remove("cc_scan_code")
                 .apply();
     }
 
@@ -991,7 +1027,89 @@ public class MainActivity extends NativeActivity {
 
     public void launchPackageFromRust(String pkg) {
         if (pkg == null || pkg.isEmpty()) return;
+        recordRecentLaunch(pkg);
         VoiceAssistant.launchPackage(this, pkg);
+    }
+
+    private void recordRecentLaunch(String pkg) {
+        try {
+            SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
+            String raw = sp.getString("recent_mru", "");
+            List<String> list = new ArrayList<>();
+            list.add(pkg);
+            if (!raw.isEmpty()) {
+                for (String p : raw.split(",")) {
+                    if (!p.isEmpty() && !p.equals(pkg) && list.size() < 16) {
+                        list.add(p);
+                    }
+                }
+            }
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) sb.append(',');
+                sb.append(list.get(i));
+            }
+            sp.edit().putString("recent_mru", sb.toString()).apply();
+        } catch (Throwable ignored) { }
+    }
+
+    public void refreshBackgroundAppsFromRust() {
+        new Thread(() -> {
+            LinkedHashMap<String, Boolean> found = new LinkedHashMap<>();
+            try {
+                ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                if (am != null) {
+                    List<ActivityManager.RunningAppProcessInfo> procs = am.getRunningAppProcesses();
+                    if (procs != null) {
+                        for (ActivityManager.RunningAppProcessInfo p : procs) {
+                            if (p.pkgList == null) continue;
+                            for (String pkg : p.pkgList) {
+                                if (pkg != null && !pkg.equals(getPackageName()) && !isSystemUtilityPackage(pkg)) {
+                                    found.put(pkg, Boolean.TRUE);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable ignored) { }
+
+            try {
+                String raw = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
+                        .getString("recent_mru", "");
+                if (!raw.isEmpty()) {
+                    for (String pkg : raw.split(",")) {
+                        if (!pkg.isEmpty() && !pkg.equals(getPackageName()) && !found.containsKey(pkg)) {
+                            found.put(pkg, Boolean.FALSE);
+                        }
+                    }
+                }
+            } catch (Throwable ignored) { }
+
+            String[] pkgs = new String[found.size()];
+            boolean[] running = new boolean[found.size()];
+            int idx = 0;
+            for (Map.Entry<String, Boolean> e : found.entrySet()) {
+                pkgs[idx] = e.getKey();
+                running[idx] = Boolean.TRUE.equals(e.getValue());
+                idx++;
+            }
+            nativeSetBackgroundApps(pkgs, running);
+        }, "ferrodeck-bg-apps").start();
+    }
+
+    public void toggleDndFromRust() {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null && nm.isNotificationPolicyAccessGranted()) {
+                boolean cur = nm.getCurrentInterruptionFilter() != NotificationManager.INTERRUPTION_FILTER_ALL;
+                nm.setInterruptionFilter(cur
+                        ? NotificationManager.INTERRUPTION_FILTER_ALL
+                        : NotificationManager.INTERRUPTION_FILTER_PRIORITY);
+                refreshSystemSnapshot();
+                return;
+            }
+        } catch (Throwable ignored) { }
+        openSafeIntent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS, Settings.ACTION_SOUND_SETTINGS);
     }
 
     public void killBackgroundPackageFromRust(String pkg) {

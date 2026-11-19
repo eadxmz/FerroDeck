@@ -7,7 +7,7 @@
 //! 3. Recent Apps Switcher (`image_4f8f85.jpg`): Top-right live RAM meter pill + horizontal app cards
 //! 4. Full Two-Pane Home Settings (`HomeSettingsScreen`) including all Advanced ADB options.
 
-use crate::anim::{ease_out_cubic, smooth_to, spring_to, with_alpha};
+use crate::anim::{ease_out_cubic, smooth_to, with_alpha};
 use crate::clock::{draw_crisp_label, measure_label_width, CrispClock};
 use crate::glyphs::{draw_glyph, Glyph};
 use crate::settings_pill::{rounded_rect_path, HomeSettingsScreen, SettingRowItem, SettingsCategory};
@@ -433,6 +433,11 @@ pub enum SideEffect {
     PromptWeatherCity,
     FetchWeatherNow,
     SavePrefs,
+    OpenMemoryApps,
+    ToggleDnd,
+    StartCaptureVoice,
+    StartCaptureControlCenter,
+    ResetKeybinds,
 }
 
 #[derive(Clone, Debug)]
@@ -479,6 +484,12 @@ pub struct LauncherUi {
 
     // Launcher preferences
     pub setup_done: bool,
+    pub animations_enabled: bool,
+    pub cc_key_label: String,
+    pub capture_prompt: Option<&'static str>,
+    pub recent_pkgs: Vec<(String, bool)>,
+    pub recent_cleared: bool,
+    pub recent_toast: Option<String>,
     pub lang_region_global: bool,
     pub classic_look: bool,
     pub clock_style: u8, // 0 = Giant Scene Glass Clock, 1 = Top-Right Crisp, 2 = Hidden
@@ -503,9 +514,12 @@ pub struct LauncherUi {
     prev_foreground_pm: Option<Pixmap>,
     scene_fade: f32,
     glass_backdrop_pm: Option<Pixmap>,
+    cached_scene_pm: Option<Pixmap>,
+    cached_scene_sig: (u32, u32, usize, u8, String, String, String),
+    cached_glass_screen_pm: Option<Pixmap>,
+    cached_glass_dims: (u32, u32),
     settings_icon_pm: Option<Pixmap>,
     focus_scales: Vec<f32>,
-    focus_vels: Vec<f32>,
     dock_tip_x_u: f32,
     dock_tip_alpha: f32,
     top_scales: [f32; 2],
@@ -579,6 +593,12 @@ impl LauncherUi {
             setup: SetupWizard::new(bold_font, med_font, reg_font),
             settings: HomeSettingsScreen::new(bold_font, med_font, reg_font),
             setup_done: false,
+            animations_enabled: true,
+            cc_key_label: "Menu Button".into(),
+            capture_prompt: None,
+            recent_pkgs: Vec::new(),
+            recent_cleared: false,
+            recent_toast: None,
             lang_region_global: false,
             classic_look: false,
             clock_style: 0,
@@ -602,9 +622,12 @@ impl LauncherUi {
             prev_foreground_pm: None,
             scene_fade: 1.0,
             glass_backdrop_pm: None,
+            cached_scene_pm: None,
+            cached_scene_sig: (0, 0, 999, 99, String::new(), String::new(), String::new()),
+            cached_glass_screen_pm: None,
+            cached_glass_dims: (0, 0),
             settings_icon_pm: settings_icon,
             focus_scales: Vec::new(),
-            focus_vels: Vec::new(),
             dock_tip_x_u: -1.0,
             dock_tip_alpha: 1.0,
             top_scales: [1.0, 1.0],
@@ -636,7 +659,6 @@ impl LauncherUi {
             is_builtin: true,
         });
         self.focus_scales = vec![1.0; apps.len()];
-        self.focus_vels = vec![0.0; apps.len()];
         if !self.focus_scales.is_empty() {
             self.focus_scales[0] = 1.16;
         }
@@ -663,6 +685,8 @@ impl LauncherUi {
         if let Some(size) = tiny_skia::IntSize::from_wh(bg_w, bg_h) {
             if let Some(pm) = Pixmap::from_vec(bg_rgba, size) {
                 self.glass_backdrop_pm = Some(bake_liquid_glass(&pm));
+                self.cached_glass_screen_pm = None;
+                self.cached_scene_pm = None;
                 self.wallpaper_pm = Some(pm);
             }
         }
@@ -762,6 +786,8 @@ impl LauncherUi {
             self.scene_fade = 0.0;
         }
         self.glass_backdrop_pm = None;
+        self.cached_glass_screen_pm = None;
+        self.cached_scene_pm = None;
     }
 
     pub fn on_home_pressed(&mut self) {
@@ -833,6 +859,14 @@ impl LauncherUi {
                     value: if self.clock_24h { "24 hour".into() } else { "12 hour".into() },
                     checked: None,
                     action_id: "toggle_clock_24h",
+                },
+                SettingRowItem {
+                    section: "PERFORMANCE & MOTION",
+                    title: "UI animations".into(),
+                    subtitle: Some("Turn off for zero-latency instant transitions on slower TVs".into()),
+                    value: if self.animations_enabled { "Fluid (Fast)".into() } else { "Off (Instant)".into() },
+                    checked: None,
+                    action_id: "toggle_animations",
                 },
             ],
             SettingsCategory::Weather => vec![
@@ -966,10 +1000,18 @@ impl LauncherUi {
                 SettingRowItem {
                     section: "VOICE ASSISTANT KEYBIND",
                     title: "Set Voice Assistant button…".into(),
-                    subtitle: Some("Press OK, then press the remote button you want for Voice Assistant".into()),
+                    subtitle: Some("Press OK, then press any remote or keyboard button".into()),
                     value: last_key_label.into(),
                     checked: None,
                     action_id: "capture_voice_key",
+                },
+                SettingRowItem {
+                    section: "CONTROL CENTER KEYBIND",
+                    title: "Bind button to Control Center…".into(),
+                    subtitle: Some("Press OK, then press any remote or keyboard button".into()),
+                    value: self.cc_key_label.clone(),
+                    checked: None,
+                    action_id: "capture_cc_key",
                 },
                 SettingRowItem {
                     section: "ACCESSIBILITY SERVICE",
@@ -984,12 +1026,12 @@ impl LauncherUi {
                     action_id: "open_a11y",
                 },
                 SettingRowItem {
-                    section: "CONTROL CENTER KEYBIND",
-                    title: "Bind button to Control Center…".into(),
-                    subtitle: Some("Press OK, then press any remote button to open Control Center".into()),
-                    value: format!("{} mapped", bound_count),
+                    section: "DEFAULTS",
+                    title: "Reset keybinds to default".into(),
+                    subtitle: Some(format!("{} active mappings", bound_count)),
+                    value: "Reset".into(),
                     checked: None,
-                    action_id: "capture_cc_key",
+                    action_id: "reset_keybinds",
                 },
             ],
             SettingsCategory::QuickSettings => vec![
@@ -1282,7 +1324,13 @@ impl LauncherUi {
                 (false, SideEffect::None, false)
             }
             "open_a11y" => (false, SideEffect::OpenAccessibilitySettings, false),
-            "capture_key" => (false, SideEffect::None, true),
+            "capture_key" | "capture_voice_key" => (false, SideEffect::StartCaptureVoice, true),
+            "capture_cc_key" => (false, SideEffect::StartCaptureControlCenter, true),
+            "reset_keybinds" => (false, SideEffect::ResetKeybinds, false),
+            "toggle_animations" => {
+                self.animations_enabled = !self.animations_enabled;
+                (false, SideEffect::SavePrefs, false)
+            }
             "open_home_picker" => (false, SideEffect::OpenDefaultHomePicker, false),
             "open_android_settings" => (false, SideEffect::OpenAndroidSettings, false),
             id if id.starts_with("set_lang:") => {
@@ -1429,10 +1477,11 @@ impl LauncherUi {
         }
 
         if self.recent_apps_open {
-            let max_items = self.apps.len().saturating_sub(1).max(1);
+            let max_items = self.recent_app_tiles().len().max(1);
             if dx != 0 {
                 self.recent_selected =
                     (self.recent_selected as isize + dx).rem_euclid(max_items as isize) as usize;
+                self.recent_toast = None;
             }
             return;
         }
@@ -1495,13 +1544,15 @@ impl LauncherUi {
                 (SideEffect::OpenBluetoothSettings, false)
             }
             2 => {
-                // Memory (Clean RAM)
-                (SideEffect::CleanMemoryNow, false)
+                // Memory -> Open Background / Open Apps Switcher
+                self.control_center_open = false;
+                self.open_recent_apps();
+                (SideEffect::OpenMemoryApps, false)
             }
             3 => {
                 // Do Not Disturb
                 self.sys.dnd_on = !self.sys.dnd_on;
-                (SideEffect::None, false)
+                (SideEffect::ToggleDnd, false)
             }
             4 => {
                 // Audio
@@ -1761,31 +1812,217 @@ impl LauncherUi {
         (None, SideEffect::None)
     }
 
+    pub fn open_recent_apps(&mut self) {
+        self.recent_apps_open = true;
+        self.recent_selected = 0;
+        self.recent_scroll_pos = 0.0;
+        self.recent_toast = None;
+    }
+
+    pub fn recent_app_tiles(&self) -> Vec<(&AppTile, bool)> {
+        if self.recent_cleared {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if !self.recent_pkgs.is_empty() {
+            for (pkg, is_running) in &self.recent_pkgs {
+                if let Some(tile) = self.apps.iter().find(|a| &a.package_name == pkg && a.package_name != SETTINGS_TILE_PKG) {
+                    out.push((tile, *is_running));
+                }
+            }
+        }
+        if out.is_empty() {
+            for tile in &self.apps {
+                if tile.package_name != SETTINGS_TILE_PKG {
+                    out.push((tile, false));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn selected_recent_pkg(&self) -> Option<String> {
+        let list = self.recent_app_tiles();
+        if list.is_empty() {
+            return None;
+        }
+        let idx = self.recent_selected.min(list.len() - 1);
+        Some(list[idx].0.package_name.clone())
+    }
+
+    pub fn close_selected_recent_app(&mut self) -> Option<String> {
+        let list: Vec<(String, String)> = self
+            .recent_app_tiles()
+            .into_iter()
+            .map(|(t, _)| (t.package_name.clone(), t.label.clone()))
+            .collect();
+        if list.is_empty() {
+            return None;
+        }
+        // Materialize recent_pkgs from fallback if needed so removal persists visually
+        if self.recent_pkgs.is_empty() {
+            self.recent_pkgs = list.iter().map(|(p, _)| (p.clone(), false)).collect();
+        }
+        let idx = self.recent_selected.min(list.len() - 1);
+        let (pkg, label) = list[idx].clone();
+        self.recent_pkgs.retain(|(p, _)| p != &pkg);
+        if self.recent_pkgs.is_empty() {
+            self.recent_cleared = true;
+            self.recent_selected = 0;
+            self.recent_scroll_pos = 0.0;
+        } else {
+            self.recent_selected = self.recent_selected.min(self.recent_pkgs.len() - 1);
+        }
+        self.recent_toast = Some(format!("Closed {}", label));
+        Some(pkg)
+    }
+
+    pub fn clear_all_recent_apps(&mut self) {
+        self.recent_pkgs.clear();
+        self.recent_cleared = true;
+        self.recent_selected = 0;
+        self.recent_scroll_pos = 0.0;
+        self.recent_toast = Some("Cleared all background apps".into());
+    }
+
+    fn ensure_cached_glass(&mut self, w: u32, h: u32) {
+        if self.cached_glass_screen_pm.is_some() && self.cached_glass_dims == (w, h) {
+            return;
+        }
+        let Some(ref glass) = self.glass_backdrop_pm else {
+            return;
+        };
+        let Some(mut buf) = Pixmap::new(w, h) else {
+            return;
+        };
+        let sx = w as f32 / glass.width() as f32;
+        let sy = h as f32 / glass.height() as f32;
+        buf.draw_pixmap(
+            0,
+            0,
+            glass.as_ref(),
+            &PixmapPaint {
+                quality: FilterQuality::Bilinear,
+                ..Default::default()
+            },
+            Transform::from_scale(sx, sy),
+            None,
+        );
+        let mut scrim = Paint::default();
+        scrim.set_color(Color::from_rgba8(10, 12, 20, 198));
+        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32) {
+            buf.fill_rect(r, &scrim, Transform::identity(), None);
+        }
+        self.cached_glass_screen_pm = Some(buf);
+        self.cached_glass_dims = (w, h);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_cached_scene(
+        &mut self,
+        w: u32,
+        h: u32,
+        unit: f32,
+        time_str: &str,
+        greeting_str: &str,
+        full_date_line: &str,
+    ) {
+        let sig = (
+            w,
+            h,
+            self.scene_idx,
+            self.clock_style,
+            time_str.to_string(),
+            greeting_str.to_string(),
+            full_date_line.to_string(),
+        );
+        if self.cached_scene_pm.is_some() && self.cached_scene_sig == sig {
+            return;
+        }
+        let Some(mut base) = Pixmap::new(w, h) else {
+            return;
+        };
+        let sw = w as f32;
+        let scene = self.current_scene();
+
+        if let Some(ref wp) = self.wallpaper_pm {
+            draw_cover_pixmap(&mut base, wp);
+        } else {
+            base.fill(Color::from_rgba8(14, 18, 32, 255));
+        }
+
+        match self.clock_style {
+            0 => {
+                let clock_px = (scene.clock_size_u * unit).round();
+                let clock_top = ((scene.clock_top_u + 14.0) * unit).round() as i32;
+                self.clock
+                    .draw_centered(&mut base, time_str, 0, sw * 0.5, clock_top, clock_px);
+            }
+            1 => {
+                let clock_px = (24.0 * unit).round();
+                let right_cx = sw - (155.0 * unit);
+                self.clock.draw_centered(
+                    &mut base,
+                    time_str,
+                    1,
+                    right_cx,
+                    (22.0 * unit).round() as i32,
+                    clock_px,
+                );
+            }
+            _ => {}
+        }
+
+        if let Some(ref fg) = self.foreground_pm {
+            draw_cover_pixmap(&mut base, fg);
+        }
+
+        let date_y = ((scene.date_top_u + 14.0) * unit).round();
+        let greet_y = date_y - (17.5 * unit).round();
+        let greet_px = (12.5 * unit).round();
+        let date_px = (13.5 * unit).round();
+
+        let greet_w = measure_label_width(self.font_medium.as_ref(), greeting_str, greet_px);
+        draw_crisp_label(
+            &mut base,
+            self.font_medium.as_ref(),
+            greeting_str,
+            ((sw - greet_w) * 0.5).round() as i32,
+            greet_y as i32,
+            greet_px,
+            Color::from_rgba8(245, 247, 255, 235),
+            true,
+        );
+
+        let date_w = measure_label_width(self.font_medium.as_ref(), full_date_line, date_px);
+        draw_crisp_label(
+            &mut base,
+            self.font_medium.as_ref(),
+            full_date_line,
+            ((sw - date_w) * 0.5).round() as i32,
+            date_y as i32,
+            date_px,
+            Color::from_rgba8(255, 255, 255, 245),
+            true,
+        );
+
+        self.cached_scene_pm = Some(base);
+        self.cached_scene_sig = sig;
+    }
+
     pub fn tick_animations(&mut self, dt: f32) -> bool {
-        let dt = dt.clamp(0.004, 0.045);
-        let mut busy = self.settings.tick(dt);
-        if self.setup.tick(dt) {
+        let dt = dt.clamp(0.008, 0.14);
+        let anim_on = self.animations_enabled;
+        let mut busy = self.settings.tick(dt, anim_on);
+        if self.setup.tick(dt, anim_on) {
             busy = true;
         }
 
-        // 1. Background Scene crossfade (drops old pixmaps immediately once finished for 0 RAM overhead)
-        if self.scene_fade < 1.0 {
-            if smooth_to(&mut self.scene_fade, 1.0, 6.5, dt, 0.004) {
-                busy = true;
-            } else {
-                self.prev_wallpaper_pm = None;
-                self.prev_foreground_pm = None;
-            }
-        }
-
-        // 2. Dock squircle icons lively spring physics (all icons animate smoothly up & down)
         let n = self.apps.len();
         if self.focus_scales.len() != n {
             self.focus_scales.resize(n, 1.0);
         }
-        if self.focus_vels.len() != n {
-            self.focus_vels.resize(n, 0.0);
-        }
+
         let dock_active = self.focus_zone == FocusZone::Dock
             && !self.settings.open
             && !self.control_center_open
@@ -1794,50 +2031,17 @@ impl LauncherUi {
             && !self.search_ui.open
             && !self.setup.open;
 
-        for i in 0..n {
-            let target = if dock_active && i == self.selected_index {
-                1.16
-            } else {
-                1.0
-            };
-            if spring_to(
-                &mut self.focus_scales[i],
-                &mut self.focus_vels[i],
-                target,
-                320.0,
-                25.5,
-                dt,
-                0.002,
-            ) {
-                busy = true;
-            }
-        }
-
-        // 3. Gliding dock tooltip X position & fade
-        if n > 0 {
+        let target_tip_x_u = if n > 0 {
             let end = (self.page_offset + MAX_DOCK_TILES).min(n);
             let count = end.saturating_sub(self.page_offset);
             let rel_sel = self.selected_index.saturating_sub(self.page_offset);
             let dock_w_u = 26.0 + (count as f32) * 46.0 + (count.saturating_sub(1) as f32) * 10.0;
             let start_x_u = (DESIGN_W - dock_w_u) * 0.5 + 13.0;
-            let target_tip_x_u = start_x_u + (rel_sel as f32) * 56.0 + 23.0;
-            if self.dock_tip_x_u < 0.0 {
-                self.dock_tip_x_u = target_tip_x_u;
-            } else if smooth_to(&mut self.dock_tip_x_u, target_tip_x_u, 20.0, dt, 0.25) {
-                busy = true;
-            }
-        }
-        if smooth_to(
-            &mut self.dock_tip_alpha,
-            if dock_active { 1.0 } else { 0.0 },
-            18.0,
-            dt,
-            0.004,
-        ) {
-            busy = true;
-        }
+            start_x_u + (rel_sel as f32) * 56.0 + 23.0
+        } else {
+            -1.0
+        };
 
-        // 4. Top-Right Weather & Control Center circular pills
         let top_free = !self.settings.open
             && !self.control_center_open
             && !self.recent_apps_open
@@ -1851,96 +2055,881 @@ impl LauncherUi {
             if top_free && self.focus_zone == FocusZone::TopWeather { 1.0 } else { 0.0 },
             if top_free && self.focus_zone == FocusZone::TopControlCenter { 1.0 } else { 0.0 },
         ];
-        for k in 0..2 {
-            if smooth_to(&mut self.top_scales[k], top_targets[k], 18.0, dt, 0.002) {
-                busy = true;
+
+        if !anim_on {
+            self.scene_fade = 1.0;
+            self.prev_wallpaper_pm = None;
+            self.prev_foreground_pm = None;
+            for i in 0..n {
+                self.focus_scales[i] = if dock_active && i == self.selected_index { 1.15 } else { 1.0 };
             }
-            if smooth_to(&mut self.top_tip_alphas[k], tip_targets[k], 16.0, dt, 0.004) {
+            self.dock_tip_x_u = target_tip_x_u;
+            self.dock_tip_alpha = if dock_active { 1.0 } else { 0.0 };
+            self.top_scales = top_targets;
+            self.top_tip_alphas = tip_targets;
+            self.cc_anim = if self.control_center_open { 1.0 } else { 0.0 };
+            for i in 0..12 {
+                self.cc_tile_scales[i] = if self.control_center_open && self.cc_selected == i { 1.04 } else { 1.0 };
+            }
+            self.app_menu_anim = if self.app_menu.open { 1.0 } else { 0.0 };
+            self.app_menu_pill_idx = self.app_menu.selected as f32;
+            self.weather_anim = if self.weather_popup_open { 1.0 } else { 0.0 };
+            self.search_anim = if self.search_ui.open { 1.0 } else { 0.0 };
+            self.recent_anim = if self.recent_apps_open { 1.0 } else { 0.0 };
+            self.recent_scroll_pos = self.recent_selected as f32;
+            return false;
+        }
+
+        if self.scene_fade < 1.0 {
+            if smooth_to(&mut self.scene_fade, 1.0, 12.0, dt, 0.02) {
+                busy = true;
+            } else {
+                self.prev_wallpaper_pm = None;
+                self.prev_foreground_pm = None;
+            }
+        }
+
+        for i in 0..n {
+            let target = if dock_active && i == self.selected_index { 1.15 } else { 1.0 };
+            if smooth_to(&mut self.focus_scales[i], target, 28.0, dt, 0.012) {
                 busy = true;
             }
         }
 
-        // 5. Control Center slide-in/out & per-tile focus pop
-        if smooth_to(
-            &mut self.cc_anim,
-            if self.control_center_open { 1.0 } else { 0.0 },
-            15.0,
-            dt,
-            0.003,
-        ) {
+        if target_tip_x_u >= 0.0 {
+            if self.dock_tip_x_u < 0.0 {
+                self.dock_tip_x_u = target_tip_x_u;
+            } else if smooth_to(&mut self.dock_tip_x_u, target_tip_x_u, 30.0, dt, 0.9) {
+                busy = true;
+            }
+        }
+        if smooth_to(&mut self.dock_tip_alpha, if dock_active { 1.0 } else { 0.0 }, 26.0, dt, 0.02) {
+            busy = true;
+        }
+
+        for k in 0..2 {
+            if smooth_to(&mut self.top_scales[k], top_targets[k], 28.0, dt, 0.012) {
+                busy = true;
+            }
+            if smooth_to(&mut self.top_tip_alphas[k], tip_targets[k], 26.0, dt, 0.02) {
+                busy = true;
+            }
+        }
+
+        if smooth_to(&mut self.cc_anim, if self.control_center_open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
             busy = true;
         }
         for i in 0..12 {
-            let t = if self.control_center_open && self.cc_selected == i {
-                1.045
+            let t = if self.control_center_open && self.cc_selected == i { 1.04 } else { 1.0 };
+            if smooth_to(&mut self.cc_tile_scales[i], t, 30.0, dt, 0.01) {
+                busy = true;
+            }
+        }
+
+        if smooth_to(&mut self.app_menu_anim, if self.app_menu.open { 1.0 } else { 0.0 }, 28.0, dt, 0.018) {
+            busy = true;
+        }
+        if self.app_menu.open || self.app_menu_anim > 0.01 {
+            if smooth_to(&mut self.app_menu_pill_idx, self.app_menu.selected as f32, 32.0, dt, 0.03) {
+                busy = true;
+            }
+        }
+
+        if smooth_to(&mut self.weather_anim, if self.weather_popup_open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
+            busy = true;
+        }
+        if smooth_to(&mut self.search_anim, if self.search_ui.open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
+            busy = true;
+        }
+        if smooth_to(&mut self.recent_anim, if self.recent_apps_open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
+            busy = true;
+        }
+        if self.recent_apps_open || self.recent_anim > 0.01 {
+            if smooth_to(&mut self.recent_scroll_pos, self.recent_selected as f32, 24.0, dt, 0.025) {
+                busy = true;
+            }
+        }
+
+        busy
+    }
+
+    pub fn render(
+        &mut self,
+        pm: &mut Pixmap,
+        time_str: &str,
+        greeting_str: &str,
+        date_str: &str,
+        last_key_label: &str,
+        bound_count: usize,
+    ) {
+        self.ensure_procedural_scene();
+
+        let sw = pm.width() as f32;
+        let sh = pm.height() as f32;
+        let unit = (sw / DESIGN_W).min(sh / DESIGN_H);
+        let scene = self.current_scene();
+
+        let full_date_line = if self.weather_enabled && !self.weather_temp.is_empty() {
+            if self.weather_desc.is_empty() {
+                format!("{}  ·  {}", date_str, self.weather_temp)
             } else {
-                1.0
+                format!("{}  ·  {} {}", date_str, self.weather_temp, self.weather_desc)
+            }
+        } else {
+            date_str.to_string()
+        };
+
+        self.ensure_cached_glass(pm.width(), pm.height());
+
+        if self.scene_fade >= 0.995 {
+            self.ensure_cached_scene(pm.width(), pm.height(), unit, time_str, greeting_str, &full_date_line);
+            if let Some(ref base) = self.cached_scene_pm {
+                pm.data_mut().copy_from_slice(base.data());
+            }
+        } else {
+            let f = ease_out_cubic(self.scene_fade);
+            if let Some(ref prev_wp) = self.prev_wallpaper_pm {
+                draw_cover_pixmap_alpha(pm, prev_wp, 1.0);
+            }
+            if let Some(ref wp) = self.wallpaper_pm {
+                draw_cover_pixmap_alpha(pm, wp, f);
+            }
+            if let Some(ref prev_fg) = self.prev_foreground_pm {
+                draw_cover_pixmap_alpha(pm, prev_fg, 1.0 - f);
+            }
+            if let Some(ref fg) = self.foreground_pm {
+                draw_cover_pixmap_alpha(pm, fg, f);
+            }
+        }
+
+        if self.ambient_mode_open {
+            if dx != 0 {
+                self.scene_idx =
+                    (self.scene_idx as isize + if dx > 0 { 1 } else { -1 }).rem_euclid(SCENES.len() as isize) as usize;
+                self.invalidate_scene_cache();
+            }
+            return;
+        }
+
+        if self.settings.open {
+            if dy < 0 {
+                self.settings.move_up(row_count);
+            } else if dy > 0 {
+                self.settings.move_down(row_count);
+            } else if dx > 0 {
+                self.settings.move_right(row_count);
+            } else if dx < 0 {
+                self.settings.move_left();
+            }
+            return;
+        }
+
+        if self.control_center_open {
+            // 0..8 = 2x4 grid of stadium pills; 8..12 = 4 squircle buttons on bottom row
+            let idx = self.cc_selected;
+            if idx < 8 {
+                let row = idx / 2;
+                let col = idx % 2;
+                if dx != 0 {
+                    self.cc_selected = row * 2 + (1 - col);
+                } else if dy < 0 {
+                    if row > 0 {
+                        self.cc_selected = (row - 1) * 2 + col;
+                    } else {
+                        self.cc_selected = 8 + col * 2;
+                    }
+                } else if dy > 0 {
+                    if row < 3 {
+                        self.cc_selected = (row + 1) * 2 + col;
+                    } else {
+                        self.cc_selected = 8 + col * 2;
+                    }
+                }
+            } else {
+                let bcol = idx - 8;
+                if dx < 0 {
+                    self.cc_selected = 8 + (bcol + 3) % 4;
+                } else if dx > 0 {
+                    self.cc_selected = 8 + (bcol + 1) % 4;
+                } else if dy < 0 {
+                    self.cc_selected = 6 + (bcol / 2);
+                } else if dy > 0 {
+                    self.cc_selected = bcol / 2;
+                }
+            }
+            return;
+        }
+
+        if self.recent_apps_open {
+            let max_items = self.recent_app_tiles().len().max(1);
+            if dx != 0 {
+                self.recent_selected =
+                    (self.recent_selected as isize + dx).rem_euclid(max_items as isize) as usize;
+                self.recent_toast = None;
+            }
+            return;
+        }
+
+        if self.weather_popup_open {
+            if dx != 0 {
+                self.scene_idx =
+                    (self.scene_idx as isize + if dx > 0 { 1 } else { -1 }).rem_euclid(SCENES.len() as isize) as usize;
+                self.invalidate_scene_cache();
+            }
+            return;
+        }
+
+        // Home screen D-Pad: Up/Down moves between Dock and Top-Right pills
+        if dy < 0 && self.focus_zone == FocusZone::Dock {
+            self.focus_zone = FocusZone::TopControlCenter;
+            return;
+        }
+        if dy > 0 && self.focus_zone != FocusZone::Dock {
+            self.focus_zone = FocusZone::Dock;
+            return;
+        }
+
+        if self.focus_zone != FocusZone::Dock {
+            if dx != 0 {
+                self.focus_zone = match self.focus_zone {
+                    FocusZone::TopWeather => FocusZone::TopControlCenter,
+                    FocusZone::TopControlCenter => FocusZone::TopWeather,
+                    FocusZone::Dock => FocusZone::Dock,
+                };
+            }
+            return;
+        }
+
+        let len = self.apps.len();
+        if len == 0 {
+            return;
+        }
+        if dx != 0 {
+            let next = (self.selected_index as isize + dx).rem_euclid(len as isize) as usize;
+            self.selected_index = next;
+            if self.selected_index < self.page_offset {
+                self.page_offset = self.selected_index;
+            } else if self.selected_index >= self.page_offset + MAX_DOCK_TILES {
+                self.page_offset = self.selected_index + 1 - MAX_DOCK_TILES;
+            }
+        }
+    }
+
+    pub fn activate_control_center_item(&mut self) -> (SideEffect, bool) {
+        match self.cc_selected {
+            0 => {
+                // Wi-Fi
+                self.control_center_open = false;
+                (SideEffect::OpenWifiSettings, false)
+            }
+            1 => {
+                // Bluetooth
+                self.control_center_open = false;
+                (SideEffect::OpenBluetoothSettings, false)
+            }
+            2 => {
+                // Memory -> Open Background / Open Apps Switcher
+                self.control_center_open = false;
+                self.open_recent_apps();
+                (SideEffect::OpenMemoryApps, false)
+            }
+            3 => {
+                // Do Not Disturb
+                self.sys.dnd_on = !self.sys.dnd_on;
+                (SideEffect::ToggleDnd, false)
+            }
+            4 => {
+                // Audio
+                self.control_center_open = false;
+                (SideEffect::OpenSoundSettings, false)
+            }
+            5 => {
+                // Sleep Timer
+                self.sleep_timer_mins = match self.sleep_timer_mins {
+                    0 => 15,
+                    15 => 30,
+                    30 => 60,
+                    _ => 0,
+                };
+                (SideEffect::None, false)
+            }
+            6 => {
+                // Ambient Mode (Screensaver)
+                self.control_center_open = false;
+                self.ambient_mode_open = true;
+                (SideEffect::None, false)
+            }
+            7 => {
+                // Power Off / Screen Off
+                self.control_center_open = false;
+                (SideEffect::LockScreenNow, false)
+            }
+            8 => {
+                // Inputs squircle
+                self.control_center_open = false;
+                (SideEffect::OpenInputsOrTvSettings, false)
+            }
+            9 => {
+                // Button Mapper squircle
+                self.control_center_open = false;
+                self.settings.open_at(SettingsCategory::ButtonMapper);
+                (SideEffect::None, false)
+            }
+            10 => {
+                // Home Settings gear squircle
+                self.control_center_open = false;
+                self.settings.open_at(SettingsCategory::Appearance);
+                (SideEffect::RefreshSystemSnapshot, false)
+            }
+            11 => {
+                // Native Search Overlay (apps, YouTube/Browser search, or ask a question)
+                self.control_center_open = false;
+                self.search_ui.open = true;
+                self.search_ui.query.clear();
+                self.search_ui.focus_row = 0;
+                self.search_ui.key_idx = 0;
+                self.search_ui.result_idx = 0;
+                (SideEffect::None, false)
+            }
+            _ => (SideEffect::None, false),
+        }
+    }
+
+    pub fn handle_tap(&mut self, px: f32, py: f32, sw: f32, sh: f32) -> (Option<String>, SideEffect) {
+        let unit = (sw / DESIGN_W).min(sh / DESIGN_H);
+
+        if self.ambient_mode_open {
+            self.ambient_mode_open = false;
+            return (None, SideEffect::None);
+        }
+
+        if self.weather_popup_open {
+            self.weather_popup_open = false;
+            return (None, SideEffect::None);
+        }
+
+        if self.recent_apps_open {
+            self.recent_apps_open = false;
+            return (None, SideEffect::None);
+        }
+
+        if self.search_ui.open {
+            let margin = (48.0 * unit).round();
+            let box_w = sw - margin * 2.0;
+            let key_y = (94.0 * unit).round();
+            let key_h = (30.0 * unit).round();
+            let key_gap = (4.0 * unit).round();
+            let total_keys = SEARCH_KEYS.len();
+            let visible_keys = 22usize;
+            let k_start = if self.search_ui.key_idx >= visible_keys {
+                self.search_ui.key_idx + 1 - visible_keys
+            } else {
+                0
             };
-            if smooth_to(&mut self.cc_tile_scales[i], t, 22.0, dt, 0.002) {
+            if py >= key_y && py <= key_y + key_h {
+                let mut kx = margin;
+                for idx in k_start..(k_start + visible_keys).min(total_keys) {
+                    let lbl = SEARCH_KEYS[idx];
+                    let kw = if lbl.len() > 1 { (44.0 * unit).round() } else { (30.0 * unit).round() };
+                    if px >= kx && px <= kx + kw {
+                        self.search_ui.focus_row = 0;
+                        self.search_ui.key_idx = idx;
+                        match lbl {
+                            "SPACE" => self.search_ui.query.push(' '),
+                            "DEL" => { self.search_ui.query.pop(); }
+                            "MIC" => return (None, SideEffect::TriggerVoiceAssistant),
+                            ch => self.search_ui.query.push_str(&ch.to_lowercase()),
+                        }
+                        return (None, SideEffect::None);
+                    }
+                    kx += kw + key_gap;
+                }
+            }
+            let results = self.search_matching_apps();
+            let res_top = (146.0 * unit).round();
+            let row_h = (38.0 * unit).round();
+            let row_gap = (8.0 * unit).round();
+            if px >= margin && px <= margin + box_w {
+                for (i, (pkg, _lbl, is_action)) in results.iter().take(7).enumerate() {
+                    let ry = res_top + (i as f32) * (row_h + row_gap);
+                    if py >= ry && py <= ry + row_h {
+                        self.search_ui.focus_row = 1;
+                        self.search_ui.result_idx = i;
+                        if !*is_action {
+                            self.search_ui.open = false;
+                            return (Some(pkg.clone()), SideEffect::None);
+                        }
+                        break;
+                    }
+                }
+            }
+            if py < (30.0 * unit) {
+                self.search_ui.open = false;
+            }
+            return (None, SideEffect::None);
+        }
+
+        if self.control_center_open {
+            // Check right-aligned Control Center panel geometry (matches draw_control_center)
+            let pill_w = (152.0 * unit).round();
+            let pill_h = (52.0 * unit).round();
+            let col_gap = (12.0 * unit).round();
+            let row_gap = (12.0 * unit).round();
+            let grid_w = pill_w * 2.0 + col_gap;
+            let grid_x = (sw - 34.0 * unit - grid_w).round();
+            let grid_y = (76.0 * unit).round();
+
+            for i in 0..8usize {
+                let r = (i / 2) as f32;
+                let c = (i % 2) as f32;
+                let x = grid_x + c * (pill_w + col_gap);
+                let y = grid_y + r * (pill_h + row_gap);
+                if px >= x && px <= x + pill_w && py >= y && py <= y + pill_h {
+                    self.cc_selected = i;
+                    let (eff, _) = self.activate_control_center_item();
+                    return (None, eff);
+                }
+            }
+
+            let sq_y = grid_y + 4.0 * (pill_h + row_gap);
+            let sq_gap = (12.0 * unit).round();
+            let sq_size = ((grid_w - sq_gap * 3.0) / 4.0).round();
+            for b in 0..4usize {
+                let x = grid_x + (b as f32) * (sq_size + sq_gap);
+                if px >= x && px <= x + sq_size && py >= sq_y && py <= sq_y + sq_size {
+                    self.cc_selected = 8 + b;
+                    let (eff, _) = self.activate_control_center_item();
+                    return (None, eff);
+                }
+            }
+
+            // Tap outside dismisses Control Center
+            self.control_center_open = false;
+            return (None, SideEffect::None);
+        }
+
+        if self.settings.open {
+            // Left sidebar taps
+            let side_x = (46.0 * unit).round();
+            let side_w = (268.0 * unit).round();
+            let pill_h = (31.0 * unit).round();
+            if px >= side_x && px <= side_x + side_w {
+                for i in 0..SettingsCategory::ALL.len() {
+                    let ry = ((74.0 + (i as f32) * 35.0) * unit).round();
+                    if py >= ry && py <= ry + pill_h {
+                        self.settings.category_idx = i;
+                        self.settings.row_idx = 0;
+                        self.settings.in_right_pane = false;
+                        return (None, SideEffect::None);
+                    }
+                }
+            }
+
+            // Right pane row taps (matches inline section headers + pills)
+            let main_x = (348.0 * unit).round();
+            let main_w = (sw - main_x - 52.0 * unit).round();
+            let rows = self.build_settings_rows("", 0);
+            let layouts = self.settings.compute_visible_layout(&rows, unit);
+            if px >= main_x && px <= main_x + main_w {
+                for lay in layouts {
+                    if py >= lay.pill_y && py <= lay.pill_y + lay.pill_h {
+                        self.settings.in_right_pane = true;
+                        self.settings.row_idx = lay.abs_idx;
+                        let (_, eff, _) = self.execute_setting_action(rows[lay.abs_idx].action_id);
+                        return (None, eff);
+                    }
+                }
+            }
+            return (None, SideEffect::None);
+        }
+
+        // Top-Right Weather & Control Center circular pills
+        let size = (38.0 * unit).round();
+        let top_y = (18.0 * unit).round();
+        let right_margin = (22.0 * unit).round();
+        let gap = (10.0 * unit).round();
+        let gear_x = sw - right_margin - size;
+        let weather_x = gear_x - gap - size;
+
+        if py >= top_y - 8.0 * unit && py <= top_y + size + 8.0 * unit {
+            if px >= weather_x - 6.0 * unit && px <= weather_x + size + 6.0 * unit {
+                self.focus_zone = FocusZone::TopWeather;
+                self.weather_popup_open = !self.weather_popup_open;
+                return (None, SideEffect::None);
+            }
+            if px >= gear_x - 6.0 * unit && px <= gear_x + size + 6.0 * unit {
+                self.focus_zone = FocusZone::TopControlCenter;
+                self.open_control_center();
+                return (None, SideEffect::RefreshSystemSnapshot);
+            }
+        }
+
+        // Dock Icons
+        if !self.apps.is_empty() {
+            let end = (self.page_offset + MAX_DOCK_TILES).min(self.apps.len());
+            let count = end - self.page_offset;
+            let icon_size = (46.0 * unit).round();
+            let icon_gap = (10.0 * unit).round();
+            let pad_h = (13.0 * unit).round();
+            let pad_v = (10.0 * unit).round();
+            let dock_w = pad_h * 2.0 + (count as f32) * icon_size + ((count.saturating_sub(1)) as f32) * icon_gap;
+            let dock_h = pad_v * 2.0 + icon_size;
+            let dock_x = ((sw - dock_w) * 0.5).round();
+            let dock_y = (sh - (14.0 * unit).round() - dock_h).round();
+
+            if py >= dock_y && py <= dock_y + dock_h && px >= dock_x && px <= dock_x + dock_w {
+                self.focus_zone = FocusZone::Dock;
+                let rel = ((px - (dock_x + pad_h)) / (icon_size + icon_gap)).floor() as isize;
+                if rel >= 0 && (rel as usize) < count {
+                    let target_idx = self.page_offset + (rel as usize);
+                    self.selected_index = target_idx;
+                    if let Some(tile) = self.apps.get(target_idx) {
+                        if tile.package_name == SETTINGS_TILE_PKG {
+                            return (None, SideEffect::OpenAndroidSettings);
+                        }
+                        return (Some(tile.package_name.clone()), SideEffect::None);
+                    }
+                }
+            }
+        }
+
+        (None, SideEffect::None)
+    }
+
+    pub fn open_recent_apps(&mut self) {
+        self.recent_apps_open = true;
+        self.recent_selected = 0;
+        self.recent_scroll_pos = 0.0;
+        self.recent_toast = None;
+    }
+
+    pub fn recent_app_tiles(&self) -> Vec<(&AppTile, bool)> {
+        if self.recent_cleared {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if !self.recent_pkgs.is_empty() {
+            for (pkg, is_running) in &self.recent_pkgs {
+                if let Some(tile) = self.apps.iter().find(|a| &a.package_name == pkg && a.package_name != SETTINGS_TILE_PKG) {
+                    out.push((tile, *is_running));
+                }
+            }
+        }
+        if out.is_empty() {
+            for tile in &self.apps {
+                if tile.package_name != SETTINGS_TILE_PKG {
+                    out.push((tile, false));
+                }
+            }
+        }
+        out
+    }
+
+    pub fn selected_recent_pkg(&self) -> Option<String> {
+        let list = self.recent_app_tiles();
+        if list.is_empty() {
+            return None;
+        }
+        let idx = self.recent_selected.min(list.len() - 1);
+        Some(list[idx].0.package_name.clone())
+    }
+
+    pub fn close_selected_recent_app(&mut self) -> Option<String> {
+        let list: Vec<(String, String)> = self
+            .recent_app_tiles()
+            .into_iter()
+            .map(|(t, _)| (t.package_name.clone(), t.label.clone()))
+            .collect();
+        if list.is_empty() {
+            return None;
+        }
+        // Materialize recent_pkgs from fallback if needed so removal persists visually
+        if self.recent_pkgs.is_empty() {
+            self.recent_pkgs = list.iter().map(|(p, _)| (p.clone(), false)).collect();
+        }
+        let idx = self.recent_selected.min(list.len() - 1);
+        let (pkg, label) = list[idx].clone();
+        self.recent_pkgs.retain(|(p, _)| p != &pkg);
+        if self.recent_pkgs.is_empty() {
+            self.recent_cleared = true;
+            self.recent_selected = 0;
+            self.recent_scroll_pos = 0.0;
+        } else {
+            self.recent_selected = self.recent_selected.min(self.recent_pkgs.len() - 1);
+        }
+        self.recent_toast = Some(format!("Closed {}", label));
+        Some(pkg)
+    }
+
+    pub fn clear_all_recent_apps(&mut self) {
+        self.recent_pkgs.clear();
+        self.recent_cleared = true;
+        self.recent_selected = 0;
+        self.recent_scroll_pos = 0.0;
+        self.recent_toast = Some("Cleared all background apps".into());
+    }
+
+    fn ensure_cached_glass(&mut self, w: u32, h: u32) {
+        if self.cached_glass_screen_pm.is_some() && self.cached_glass_dims == (w, h) {
+            return;
+        }
+        let Some(ref glass) = self.glass_backdrop_pm else {
+            return;
+        };
+        let Some(mut buf) = Pixmap::new(w, h) else {
+            return;
+        };
+        let sx = w as f32 / glass.width() as f32;
+        let sy = h as f32 / glass.height() as f32;
+        buf.draw_pixmap(
+            0,
+            0,
+            glass.as_ref(),
+            &PixmapPaint {
+                quality: FilterQuality::Bilinear,
+                ..Default::default()
+            },
+            Transform::from_scale(sx, sy),
+            None,
+        );
+        let mut scrim = Paint::default();
+        scrim.set_color(Color::from_rgba8(10, 12, 20, 198));
+        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32) {
+            buf.fill_rect(r, &scrim, Transform::identity(), None);
+        }
+        self.cached_glass_screen_pm = Some(buf);
+        self.cached_glass_dims = (w, h);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_cached_scene(
+        &mut self,
+        w: u32,
+        h: u32,
+        unit: f32,
+        time_str: &str,
+        greeting_str: &str,
+        full_date_line: &str,
+    ) {
+        let sig = (
+            w,
+            h,
+            self.scene_idx,
+            self.clock_style,
+            time_str.to_string(),
+            greeting_str.to_string(),
+            full_date_line.to_string(),
+        );
+        if self.cached_scene_pm.is_some() && self.cached_scene_sig == sig {
+            return;
+        }
+        let Some(mut base) = Pixmap::new(w, h) else {
+            return;
+        };
+        let sw = w as f32;
+        let scene = self.current_scene();
+
+        if let Some(ref wp) = self.wallpaper_pm {
+            draw_cover_pixmap(&mut base, wp);
+        } else {
+            base.fill(Color::from_rgba8(14, 18, 32, 255));
+        }
+
+        match self.clock_style {
+            0 => {
+                let clock_px = (scene.clock_size_u * unit).round();
+                let clock_top = ((scene.clock_top_u + 14.0) * unit).round() as i32;
+                self.clock
+                    .draw_centered(&mut base, time_str, 0, sw * 0.5, clock_top, clock_px);
+            }
+            1 => {
+                let clock_px = (24.0 * unit).round();
+                let right_cx = sw - (155.0 * unit);
+                self.clock.draw_centered(
+                    &mut base,
+                    time_str,
+                    1,
+                    right_cx,
+                    (22.0 * unit).round() as i32,
+                    clock_px,
+                );
+            }
+            _ => {}
+        }
+
+        if let Some(ref fg) = self.foreground_pm {
+            draw_cover_pixmap(&mut base, fg);
+        }
+
+        let date_y = ((scene.date_top_u + 14.0) * unit).round();
+        let greet_y = date_y - (17.5 * unit).round();
+        let greet_px = (12.5 * unit).round();
+        let date_px = (13.5 * unit).round();
+
+        let greet_w = measure_label_width(self.font_medium.as_ref(), greeting_str, greet_px);
+        draw_crisp_label(
+            &mut base,
+            self.font_medium.as_ref(),
+            greeting_str,
+            ((sw - greet_w) * 0.5).round() as i32,
+            greet_y as i32,
+            greet_px,
+            Color::from_rgba8(245, 247, 255, 235),
+            true,
+        );
+
+        let date_w = measure_label_width(self.font_medium.as_ref(), full_date_line, date_px);
+        draw_crisp_label(
+            &mut base,
+            self.font_medium.as_ref(),
+            full_date_line,
+            ((sw - date_w) * 0.5).round() as i32,
+            date_y as i32,
+            date_px,
+            Color::from_rgba8(255, 255, 255, 245),
+            true,
+        );
+
+        self.cached_scene_pm = Some(base);
+        self.cached_scene_sig = sig;
+    }
+
+    pub fn tick_animations(&mut self, dt: f32) -> bool {
+        let dt = dt.clamp(0.008, 0.14);
+        let anim_on = self.animations_enabled;
+        let mut busy = self.settings.tick(dt, anim_on);
+        if self.setup.tick(dt, anim_on) {
+            busy = true;
+        }
+
+        let n = self.apps.len();
+        if self.focus_scales.len() != n {
+            self.focus_scales.resize(n, 1.0);
+        }
+
+        let dock_active = self.focus_zone == FocusZone::Dock
+            && !self.settings.open
+            && !self.control_center_open
+            && !self.recent_apps_open
+            && !self.app_menu.open
+            && !self.search_ui.open
+            && !self.setup.open;
+
+        let target_tip_x_u = if n > 0 {
+            let end = (self.page_offset + MAX_DOCK_TILES).min(n);
+            let count = end.saturating_sub(self.page_offset);
+            let rel_sel = self.selected_index.saturating_sub(self.page_offset);
+            let dock_w_u = 26.0 + (count as f32) * 46.0 + (count.saturating_sub(1) as f32) * 10.0;
+            let start_x_u = (DESIGN_W - dock_w_u) * 0.5 + 13.0;
+            start_x_u + (rel_sel as f32) * 56.0 + 23.0
+        } else {
+            -1.0
+        };
+
+        let top_free = !self.settings.open
+            && !self.control_center_open
+            && !self.recent_apps_open
+            && !self.search_ui.open
+            && !self.setup.open;
+        let top_targets = [
+            if top_free && self.focus_zone == FocusZone::TopWeather { 1.12 } else { 1.0 },
+            if top_free && self.focus_zone == FocusZone::TopControlCenter { 1.12 } else { 1.0 },
+        ];
+        let tip_targets = [
+            if top_free && self.focus_zone == FocusZone::TopWeather { 1.0 } else { 0.0 },
+            if top_free && self.focus_zone == FocusZone::TopControlCenter { 1.0 } else { 0.0 },
+        ];
+
+        if !anim_on {
+            self.scene_fade = 1.0;
+            self.prev_wallpaper_pm = None;
+            self.prev_foreground_pm = None;
+            for i in 0..n {
+                self.focus_scales[i] = if dock_active && i == self.selected_index { 1.15 } else { 1.0 };
+            }
+            self.dock_tip_x_u = target_tip_x_u;
+            self.dock_tip_alpha = if dock_active { 1.0 } else { 0.0 };
+            self.top_scales = top_targets;
+            self.top_tip_alphas = tip_targets;
+            self.cc_anim = if self.control_center_open { 1.0 } else { 0.0 };
+            for i in 0..12 {
+                self.cc_tile_scales[i] = if self.control_center_open && self.cc_selected == i { 1.04 } else { 1.0 };
+            }
+            self.app_menu_anim = if self.app_menu.open { 1.0 } else { 0.0 };
+            self.app_menu_pill_idx = self.app_menu.selected as f32;
+            self.weather_anim = if self.weather_popup_open { 1.0 } else { 0.0 };
+            self.search_anim = if self.search_ui.open { 1.0 } else { 0.0 };
+            self.recent_anim = if self.recent_apps_open { 1.0 } else { 0.0 };
+            self.recent_scroll_pos = self.recent_selected as f32;
+            return false;
+        }
+
+        if self.scene_fade < 1.0 {
+            if smooth_to(&mut self.scene_fade, 1.0, 12.0, dt, 0.02) {
+                busy = true;
+            } else {
+                self.prev_wallpaper_pm = None;
+                self.prev_foreground_pm = None;
+            }
+        }
+
+        for i in 0..n {
+            let target = if dock_active && i == self.selected_index { 1.15 } else { 1.0 };
+            if smooth_to(&mut self.focus_scales[i], target, 28.0, dt, 0.012) {
                 busy = true;
             }
         }
 
-        // 6. Compact Liquid Glass App Context Menu glide + selection pill slide
-        if smooth_to(
-            &mut self.app_menu_anim,
-            if self.app_menu.open { 1.0 } else { 0.0 },
-            17.0,
-            dt,
-            0.003,
-        ) {
+        if target_tip_x_u >= 0.0 {
+            if self.dock_tip_x_u < 0.0 {
+                self.dock_tip_x_u = target_tip_x_u;
+            } else if smooth_to(&mut self.dock_tip_x_u, target_tip_x_u, 30.0, dt, 0.9) {
+                busy = true;
+            }
+        }
+        if smooth_to(&mut self.dock_tip_alpha, if dock_active { 1.0 } else { 0.0 }, 26.0, dt, 0.02) {
             busy = true;
         }
-        if self.app_menu.open || self.app_menu_anim > 0.005 {
-            if smooth_to(
-                &mut self.app_menu_pill_idx,
-                self.app_menu.selected as f32,
-                24.0,
-                dt,
-                0.005,
-            ) {
+
+        for k in 0..2 {
+            if smooth_to(&mut self.top_scales[k], top_targets[k], 28.0, dt, 0.012) {
+                busy = true;
+            }
+            if smooth_to(&mut self.top_tip_alphas[k], tip_targets[k], 26.0, dt, 0.02) {
                 busy = true;
             }
         }
 
-        // 7. Weather Card & Search Overlay smooth transitions
-        if smooth_to(
-            &mut self.weather_anim,
-            if self.weather_popup_open { 1.0 } else { 0.0 },
-            16.0,
-            dt,
-            0.003,
-        ) {
+        if smooth_to(&mut self.cc_anim, if self.control_center_open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
             busy = true;
         }
-        if smooth_to(
-            &mut self.search_anim,
-            if self.search_ui.open { 1.0 } else { 0.0 },
-            16.0,
-            dt,
-            0.003,
-        ) {
-            busy = true;
+        for i in 0..12 {
+            let t = if self.control_center_open && self.cc_selected == i { 1.04 } else { 1.0 };
+            if smooth_to(&mut self.cc_tile_scales[i], t, 30.0, dt, 0.01) {
+                busy = true;
+            }
         }
 
-        // 8. Recent Apps Switcher fade + horizontal card carousel glide
-        if smooth_to(
-            &mut self.recent_anim,
-            if self.recent_apps_open { 1.0 } else { 0.0 },
-            15.0,
-            dt,
-            0.003,
-        ) {
+        if smooth_to(&mut self.app_menu_anim, if self.app_menu.open { 1.0 } else { 0.0 }, 28.0, dt, 0.018) {
             busy = true;
         }
-        if self.recent_apps_open || self.recent_anim > 0.005 {
-            if smooth_to(
-                &mut self.recent_scroll_pos,
-                self.recent_selected as f32,
-                14.0,
-                dt,
-                0.004,
-            ) {
+        if self.app_menu.open || self.app_menu_anim > 0.01 {
+            if smooth_to(&mut self.app_menu_pill_idx, self.app_menu.selected as f32, 32.0, dt, 0.03) {
+                busy = true;
+            }
+        }
+
+        if smooth_to(&mut self.weather_anim, if self.weather_popup_open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
+            busy = true;
+        }
+        if smooth_to(&mut self.search_anim, if self.search_ui.open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
+            busy = true;
+        }
+        if smooth_to(&mut self.recent_anim, if self.recent_apps_open { 1.0 } else { 0.0 }, 26.0, dt, 0.018) {
+            busy = true;
+        }
+        if self.recent_apps_open || self.recent_anim > 0.01 {
+            if smooth_to(&mut self.recent_scroll_pos, self.recent_selected as f32, 24.0, dt, 0.025) {
                 busy = true;
             }
         }
@@ -2090,7 +3079,7 @@ impl LauncherUi {
         if self.settings.is_visible() {
             let rows = self.build_settings_rows(last_key_label, bound_count);
             self.settings
-                .draw(pm, self.glass_backdrop_pm.as_ref(), unit, &rows);
+                .draw(pm, self.cached_glass_screen_pm.as_ref().or(self.glass_backdrop_pm.as_ref()), unit, &rows);
         }
 
         // 11. Compact Liquid Glass App Long-Press Menu (smooth slide-up + gliding pill)
@@ -2113,6 +3102,7 @@ impl LauncherUi {
                 &self.weather_city,
                 self.classic_look,
                 last_key_label,
+                &self.cc_key_label,
                 self.sys.default_home,
                 self.sys.a11y_enabled,
             );
@@ -2127,7 +3117,12 @@ impl LauncherUi {
             );
         }
 
-        // 14. Inbuilt Voice Assistant HUD pill
+        // 14. Key Capture Modal (Voice Assistant / Control Center keybind listener)
+        if let Some(target_name) = self.capture_prompt {
+            self.draw_key_capture_modal(pm, sw, sh, unit, target_name);
+        }
+
+        // 15. Inbuilt Voice Assistant HUD pill
         self.draw_voice_hud_banner(pm, sw, unit);
     }
 
@@ -2140,25 +3135,18 @@ impl LauncherUi {
         let a = self.cc_anim.clamp(0.0, 1.0);
         let slide_x = ((1.0 - ease_out_cubic(a)) * 38.0 * unit).round();
 
-        if let Some(ref glass) = self.glass_backdrop_pm {
-            let sx = sw / glass.width() as f32;
-            let sy = sh / glass.height() as f32;
-            let mut gp = Paint::default();
-            gp.shader = Pattern::new(
-                glass.as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Bilinear,
-                a,
-                Transform::from_scale(sx, sy),
-            );
-            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
-                pm.fill_rect(r, &gp, Transform::identity(), None);
+        if a >= 0.99 {
+            if let Some(ref bg) = self.cached_glass_screen_pm {
+                if bg.width() == pm.width() && bg.height() == pm.height() {
+                    pm.data_mut().copy_from_slice(bg.data());
+                }
             }
-        }
-        let mut scrim = Paint::default();
-        scrim.set_color(with_alpha(Color::from_rgba8(8, 10, 16, 175), a));
-        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
-            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        } else {
+            let mut scrim = Paint::default();
+            scrim.set_color(with_alpha(Color::from_rgba8(8, 10, 16, 185), a));
+            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+                pm.fill_rect(r, &scrim, Transform::identity(), None);
+            }
         }
 
         let pill_w = (152.0 * unit).round();
@@ -2185,7 +3173,7 @@ impl LauncherUi {
             ),
             (
                 "Memory",
-                format!("{}% used · Clean", ram_pct),
+                format!("{}% used · Manage ›", ram_pct),
                 Glyph::Memory,
                 None,
             ),
@@ -2407,24 +3395,32 @@ impl LauncherUi {
     /// - Top-left "Recent Apps" title + Top-right live `RAM X.X GB used of X.X GB` pill meter
     /// - Centered horizontal app cards + bottom hint "Press ▲ on an app to close it"
     fn draw_recent_apps(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32) {
-        let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(8, 10, 16, 212));
-        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
-            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        let a = self.recent_anim.clamp(0.0, 1.0);
+        if a >= 0.99 {
+            if let Some(ref bg) = self.cached_glass_screen_pm {
+                if bg.width() == pm.width() && bg.height() == pm.height() {
+                    pm.data_mut().copy_from_slice(bg.data());
+                }
+            }
+        } else {
+            let mut scrim = Paint::default();
+            scrim.set_color(with_alpha(Color::from_rgba8(8, 10, 16, 212), a));
+            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+                pm.fill_rect(r, &scrim, Transform::identity(), None);
+            }
         }
 
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
-            "Recent Apps",
+            "Memory & Background Apps",
             (54.0 * unit) as i32,
             (56.0 * unit) as i32,
             (19.0 * unit).round(),
-            Color::from_rgba8(255, 255, 255, 250),
+            with_alpha(Color::from_rgba8(255, 255, 255, 250), a),
             false,
         );
 
-        // Top-right RAM pill meter
         let ram_w = (290.0 * unit).round();
         let ram_h = (36.0 * unit).round();
         let ram_x = (sw - 54.0 * unit - ram_w).round();
@@ -2432,22 +3428,12 @@ impl LauncherUi {
         if let Some(rp) = rounded_rect_path(ram_x, ram_y, ram_w, ram_h, ram_h * 0.5) {
             let mut bg = Paint::default();
             bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(24, 27, 36, 220));
+            bg.set_color(with_alpha(Color::from_rgba8(24, 27, 36, 224), a));
             pm.fill_path(&rp, &bg, FillRule::Winding, Transform::identity(), None);
-
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(255, 255, 255, 76));
-            pm.stroke_path(
-                &rp,
-                &rim,
-                &Stroke {
-                    width: 1.0,
-                    ..Default::default()
-                },
-                Transform::identity(),
-                None,
-            );
+            rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 82), a));
+            pm.stroke_path(&rp, &rim, &Stroke { width: 1.0, ..Default::default() }, Transform::identity(), None);
         }
 
         let used_gb = self.sys.ram_used_mb as f32 / 1024.0;
@@ -2460,30 +3446,73 @@ impl LauncherUi {
             (ram_x + 16.0 * unit) as i32,
             (ram_y + ram_h * 0.64) as i32,
             (10.8 * unit).round(),
-            Color::from_rgba8(242, 245, 252, 245),
+            with_alpha(Color::from_rgba8(242, 245, 252, 245), a),
             false,
         );
 
-        // Horizontal app cards with smooth horizontal carousel glide
-        let app_count = self.apps.len().saturating_sub(1);
-        if app_count > 0 {
-            let card_w = (410.0 * unit).round();
-            let card_h = (232.0 * unit).round();
+        let list = self.recent_app_tiles();
+        let slide_y = ((1.0 - ease_out_cubic(a)) * 20.0 * unit).round();
+        if list.is_empty() {
+            let ew = (380.0 * unit).round();
+            let eh = (130.0 * unit).round();
+            let ex = ((sw - ew) * 0.5).round();
+            let ey = ((sh - eh) * 0.5 + slide_y).round();
+            if let Some(ep) = rounded_rect_path(ex, ey, ew, eh, 22.0 * unit) {
+                let mut bg = Paint::default();
+                bg.anti_alias = true;
+                bg.set_color(with_alpha(Color::from_rgba8(26, 30, 44, 220), a));
+                pm.fill_path(&ep, &bg, FillRule::Winding, Transform::identity(), None);
+                let mut rim = Paint::default();
+                rim.anti_alias = true;
+                rim.set_color(with_alpha(Color::from_rgba8(255, 255, 255, 76), a));
+                pm.stroke_path(&ep, &rim, &Stroke { width: 1.2, ..Default::default() }, Transform::identity(), None);
+            }
+            let msg = "All background apps cleared";
+            let mpx = (15.5 * unit).round();
+            let mw = measure_label_width(self.font_medium.as_ref(), msg, mpx);
+            draw_crisp_label(
+                pm,
+                self.font_medium.as_ref(),
+                msg,
+                ((sw - mw) * 0.5).round() as i32,
+                (ey + eh * 0.45) as i32,
+                mpx,
+                with_alpha(Color::from_rgba8(255, 255, 255, 248), a),
+                false,
+            );
+            let sub = "Press Back to return to Home";
+            let spx = (11.5 * unit).round();
+            let subw = measure_label_width(self.font_regular.as_ref(), sub, spx);
+            draw_crisp_label(
+                pm,
+                self.font_regular.as_ref(),
+                sub,
+                ((sw - subw) * 0.5).round() as i32,
+                (ey + eh * 0.72) as i32,
+                spx,
+                with_alpha(Color::from_rgba8(180, 196, 220, 225), a),
+                false,
+            );
+        } else {
+            let app_count = list.len();
+            let sel = self.recent_selected.min(app_count - 1);
+            let card_w = (360.0 * unit).round();
+            let card_h = (212.0 * unit).round();
             let card_gap = (24.0 * unit).round();
             let center_x = ((sw - card_w) * 0.5).round();
-            let slide_y = ((1.0 - ease_out_cubic(self.recent_anim)) * 24.0 * unit).round();
-            let card_y = ((sh - card_h) * 0.54 + slide_y).round();
-            let scroll_frac = self.recent_selected as f32 - self.recent_scroll_pos;
+            let card_y = ((sh - card_h) * 0.53 + slide_y).round();
+            let scroll_frac = sel as f32 - self.recent_scroll_pos;
 
-            for offset in -2isize..=2isize {
-                let idx = (self.recent_selected as isize + offset).rem_euclid(app_count as isize) as usize;
-                let Some(app) = self.apps.get(idx) else { continue };
+            let min_off = if app_count == 1 { 0 } else { -1 };
+            let max_off = if app_count == 1 { 0 } else { 1 };
+            for offset in min_off..=max_off {
+                let idx = (sel as isize + offset).rem_euclid(app_count as isize) as usize;
+                let (app, is_running) = list[idx];
                 let cx = center_x + (offset as f32 + scroll_frac) * (card_w + card_gap);
                 if cx + card_w < 0.0 || cx > sw {
                     continue;
                 }
 
-                // App name above card
                 draw_crisp_label(
                     pm,
                     self.font_medium.as_ref(),
@@ -2491,23 +3520,57 @@ impl LauncherUi {
                     (cx + 8.0 * unit) as i32,
                     (card_y - 12.0 * unit) as i32,
                     (13.5 * unit).round(),
-                    Color::from_rgba8(255, 255, 255, 245),
+                    with_alpha(Color::from_rgba8(255, 255, 255, 245), a),
                     false,
                 );
 
-                if let Some(cp) = rounded_rect_path(cx, card_y, card_w, card_h, 24.0 * unit) {
+                // Status badge (RUNNING vs RECENT)
+                let badge = if is_running { "RUNNING" } else { "RECENT" };
+                let bpx = (8.8 * unit).round();
+                let bw = measure_label_width(self.font_medium.as_ref(), badge, bpx) + 14.0 * unit;
+                let bh = (18.0 * unit).round();
+                let bx = cx + card_w - bw - 8.0 * unit;
+                let by = card_y - 26.0 * unit;
+                if let Some(bp) = rounded_rect_path(bx, by, bw, bh, bh * 0.5) {
+                    let mut fill = Paint::default();
+                    fill.anti_alias = true;
+                    fill.set_color(with_alpha(
+                        if is_running {
+                            Color::from_rgba8(42, 188, 108, 220)
+                        } else {
+                            Color::from_rgba8(255, 255, 255, 38)
+                        },
+                        a,
+                    ));
+                    pm.fill_path(&bp, &fill, FillRule::Winding, Transform::identity(), None);
+                }
+                draw_crisp_label(
+                    pm,
+                    self.font_medium.as_ref(),
+                    badge,
+                    (bx + 7.0 * unit) as i32,
+                    (by + bh * 0.72) as i32,
+                    bpx,
+                    with_alpha(Color::from_rgba8(255, 255, 255, 245), a),
+                    false,
+                );
+
+                if let Some(cp) = rounded_rect_path(cx, card_y, card_w, card_h, 22.0 * unit) {
                     let mut bg = Paint::default();
                     bg.anti_alias = true;
-                    bg.set_color(if offset == 0 {
-                        Color::from_rgba8(245, 247, 250, 250)
-                    } else {
-                        Color::from_rgba8(app.accent[0], app.accent[1], app.accent[2], 235)
-                    });
+                    bg.set_color(with_alpha(
+                        if offset == 0 {
+                            Color::from_rgba8(245, 247, 250, 250)
+                        } else {
+                            Color::from_rgba8(app.accent[0], app.accent[1], app.accent[2], 235)
+                        },
+                        a,
+                    ));
                     pm.fill_path(&cp, &bg, FillRule::Winding, Transform::identity(), None);
                 }
 
                 if let Some(ref icon) = app.icon {
-                    let isz = (86.0 * unit).round();
+                    let isz = (82.0 * unit).round();
                     let ix = cx + (card_w - isz) * 0.5;
                     let iy = card_y + (card_h - isz) * 0.5;
                     let sx = isz / icon.width() as f32;
@@ -2517,6 +3580,7 @@ impl LauncherUi {
                         0,
                         icon.as_ref(),
                         &PixmapPaint {
+                            opacity: a,
                             quality: FilterQuality::Bilinear,
                             ..Default::default()
                         },
@@ -2527,17 +3591,42 @@ impl LauncherUi {
             }
         }
 
-        let hint = "Press ▲ on an app to close it  ·  OK to open  ·  Back to close";
-        let hpx = (11.5 * unit).round();
+        if let Some(ref toast) = self.recent_toast {
+            let tpx = (11.0 * unit).round();
+            let tw = measure_label_width(self.font_medium.as_ref(), toast, tpx);
+            let pw = (tw + 26.0 * unit).round();
+            let ph = (24.0 * unit).round();
+            let px = ((sw - pw) * 0.5).round();
+            let py = (sh - 72.0 * unit).round();
+            if let Some(tp) = rounded_rect_path(px, py, pw, ph, ph * 0.5) {
+                let mut bg = Paint::default();
+                bg.anti_alias = true;
+                bg.set_color(with_alpha(Color::from_rgba8(32, 148, 96, 232), a));
+                pm.fill_path(&tp, &bg, FillRule::Winding, Transform::identity(), None);
+            }
+            draw_crisp_label(
+                pm,
+                self.font_medium.as_ref(),
+                toast,
+                (px + 13.0 * unit) as i32,
+                (py + ph * 0.68) as i32,
+                tpx,
+                with_alpha(Color::from_rgba8(255, 255, 255, 252), a),
+                false,
+            );
+        }
+
+        let hint = "Left/Right: Browse  ·  Up: Close App  ·  OK: Open  ·  Down: Clean All  ·  Back: Close";
+        let hpx = (11.2 * unit).round();
         let hw = measure_label_width(self.font_medium.as_ref(), hint, hpx);
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
             hint,
             ((sw - hw) * 0.5).round() as i32,
-            (sh - 34.0 * unit) as i32,
+            (sh - 30.0 * unit) as i32,
             hpx,
-            Color::from_rgba8(235, 240, 250, 230),
+            with_alpha(Color::from_rgba8(235, 240, 250, 230), a),
             false,
         );
     }
@@ -2828,6 +3917,30 @@ impl LauncherUi {
                     with_alpha(Color::from_rgba8(245, 246, 250, 250), tip_a),
                     false,
                 );
+            }
+        }
+
+        // Subtle dock pagination dots when more than MAX_DOCK_TILES apps are installed
+        if self.apps.len() > MAX_DOCK_TILES {
+            let pages = (self.apps.len() + MAX_DOCK_TILES - 1) / MAX_DOCK_TILES;
+            let active_page = (self.selected_index / MAX_DOCK_TILES).min(pages - 1);
+            let dot_r = (2.4 * unit).max(2.0);
+            let dot_gap = (7.0 * unit).round();
+            let total_w = (pages as f32) * (dot_r * 2.0) + ((pages - 1) as f32) * dot_gap;
+            let dx0 = ((sw - total_w) * 0.5).round();
+            let dy = (dock_y + dock_h + 4.5 * unit).round();
+            for p_i in 0..pages {
+                let dx = dx0 + (p_i as f32) * (dot_r * 2.0 + dot_gap);
+                if let Some(dp) = rounded_rect_path(dx, dy, dot_r * 2.0, dot_r * 2.0, dot_r) {
+                    let mut fill = Paint::default();
+                    fill.anti_alias = true;
+                    fill.set_color(if p_i == active_page {
+                        Color::from_rgba8(255, 255, 255, 235)
+                    } else {
+                        Color::from_rgba8(255, 255, 255, 88)
+                    });
+                    pm.fill_path(&dp, &fill, FillRule::Winding, Transform::identity(), None);
+                }
             }
         }
     }
@@ -3174,25 +4287,18 @@ impl LauncherUi {
         let a = self.search_anim.clamp(0.0, 1.0);
         let slide_y = ((1.0 - ease_out_cubic(a)) * 18.0 * unit).round();
 
-        if let Some(ref glass) = self.glass_backdrop_pm {
-            let sx = sw / glass.width() as f32;
-            let sy = sh / glass.height() as f32;
-            let mut gp = Paint::default();
-            gp.shader = Pattern::new(
-                glass.as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Bilinear,
-                a,
-                Transform::from_scale(sx, sy),
-            );
-            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
-                pm.fill_rect(r, &gp, Transform::identity(), None);
+        if a >= 0.99 {
+            if let Some(ref bg) = self.cached_glass_screen_pm {
+                if bg.width() == pm.width() && bg.height() == pm.height() {
+                    pm.data_mut().copy_from_slice(bg.data());
+                }
             }
-        }
-        let mut scrim = Paint::default();
-        scrim.set_color(with_alpha(Color::from_rgba8(10, 12, 18, 218), a));
-        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
-            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        } else {
+            let mut scrim = Paint::default();
+            scrim.set_color(with_alpha(Color::from_rgba8(8, 10, 16, 185), a));
+            if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+                pm.fill_rect(r, &scrim, Transform::identity(), None);
+            }
         }
 
         let margin = (48.0 * unit).round();
@@ -3342,6 +4448,76 @@ impl LauncherUi {
                 false,
             );
         }
+    }
+
+    fn draw_key_capture_modal(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32, target_name: &str) {
+        let mut scrim = Paint::default();
+        scrim.set_color(Color::from_rgba8(6, 8, 14, 150));
+        if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
+            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        }
+        let cw = (390.0 * unit).round();
+        let ch = (144.0 * unit).round();
+        let cx = ((sw - cw) * 0.5).round();
+        let cy = ((sh - ch) * 0.5).round();
+        if let Some(card) = rounded_rect_path(cx, cy, cw, ch, 22.0 * unit) {
+            let mut bg = Paint::default();
+            bg.anti_alias = true;
+            bg.set_color(Color::from_rgba8(22, 26, 40, 242));
+            pm.fill_path(&card, &bg, FillRule::Winding, Transform::identity(), None);
+            let mut rim = Paint::default();
+            rim.anti_alias = true;
+            rim.set_color(Color::from_rgba8(120, 195, 255, 190));
+            pm.stroke_path(
+                &card,
+                &rim,
+                &Stroke {
+                    width: (1.5 * unit).max(1.2),
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+        let title = format!("Bind {} Button", target_name);
+        let tpx = (16.5 * unit).round();
+        let tw = measure_label_width(self.font_medium.as_ref(), &title, tpx);
+        draw_crisp_label(
+            pm,
+            self.font_medium.as_ref(),
+            &title,
+            ((sw - tw) * 0.5).round() as i32,
+            (cy + 42.0 * unit) as i32,
+            tpx,
+            Color::from_rgba8(255, 255, 255, 252),
+            false,
+        );
+        let msg = "Press any button on your remote or keyboard now...";
+        let mpx = (12.2 * unit).round();
+        let mw = measure_label_width(self.font_regular.as_ref(), msg, mpx);
+        draw_crisp_label(
+            pm,
+            self.font_regular.as_ref(),
+            msg,
+            ((sw - mw) * 0.5).round() as i32,
+            (cy + 78.0 * unit) as i32,
+            mpx,
+            Color::from_rgba8(155, 215, 255, 245),
+            false,
+        );
+        let hint = "Press Back to cancel  ·  Arrows / OK / Home are reserved";
+        let hpx = (10.2 * unit).round();
+        let hw = measure_label_width(self.font_regular.as_ref(), hint, hpx);
+        draw_crisp_label(
+            pm,
+            self.font_regular.as_ref(),
+            hint,
+            ((sw - hw) * 0.5).round() as i32,
+            (cy + 114.0 * unit) as i32,
+            hpx,
+            Color::from_rgba8(185, 196, 215, 215),
+            false,
+        );
     }
 
     fn draw_voice_hud_banner(&self, pm: &mut Pixmap, sw: f32, unit: f32) {

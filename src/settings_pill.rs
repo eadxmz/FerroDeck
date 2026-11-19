@@ -205,29 +205,30 @@ impl HomeSettingsScreen {
         }
     }
 
-    pub fn tick(&mut self, dt: f32) -> bool {
-        let mut busy = smooth_to(
-            &mut self.open_anim,
-            if self.open { 1.0 } else { 0.0 },
-            15.0,
-            dt,
-            0.003,
-        );
+    pub fn tick(&mut self, dt: f32, animations_enabled: bool) -> bool {
+        let target_open = if self.open { 1.0 } else { 0.0 };
+        let target_side_u = 74.0 + (self.category_idx as f32) * 35.0;
+        if !animations_enabled {
+            self.open_anim = target_open;
+            self.side_pill_y_u = target_side_u;
+            if self.in_right_pane && self.right_pill_target_u >= 0.0 {
+                self.right_pill_y_u = self.right_pill_target_u;
+            }
+            return false;
+        }
+        let mut busy = smooth_to(&mut self.open_anim, target_open, 26.0, dt, 0.018);
         if !self.is_visible() {
             return busy;
         }
-
-        let target_side_u = 74.0 + (self.category_idx as f32) * 35.0;
         if self.side_pill_y_u < 0.0 {
             self.side_pill_y_u = target_side_u;
-        } else if smooth_to(&mut self.side_pill_y_u, target_side_u, 22.0, dt, 0.12) {
+        } else if smooth_to(&mut self.side_pill_y_u, target_side_u, 32.0, dt, 0.7) {
             busy = true;
         }
-
         if self.in_right_pane && self.right_pill_target_u >= 0.0 {
             if self.right_pill_y_u < 0.0 {
                 self.right_pill_y_u = self.right_pill_target_u;
-            } else if smooth_to(&mut self.right_pill_y_u, self.right_pill_target_u, 22.0, dt, 0.12) {
+            } else if smooth_to(&mut self.right_pill_y_u, self.right_pill_target_u, 32.0, dt, 0.7) {
                 busy = true;
             }
         }
@@ -294,25 +295,22 @@ impl HomeSettingsScreen {
         let a = self.open_anim.clamp(0.0, 1.0);
         let slide_y = ((1.0 - ease_out_cubic(a)) * 16.0 * unit).round();
 
-        if let Some(glass) = glass_bg {
-            let sx = sw / glass.width() as f32;
-            let sy = sh / glass.height() as f32;
-            let mut gp = Paint::default();
-            gp.shader = Pattern::new(
-                glass.as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Bilinear,
-                a,
-                Transform::from_scale(sx, sy),
-            );
-            if let Some(r) = Rect::from_xywh(0.0, 0.0, sw, sh) {
-                pm.fill_rect(r, &gp, Transform::identity(), None);
+        if a >= 0.99 {
+            if let Some(glass) = glass_bg {
+                if glass.width() == pm.width() && glass.height() == pm.height() {
+                    pm.data_mut().copy_from_slice(glass.data());
+                } else {
+                    pm.fill(Color::from_rgba8(12, 14, 22, 255));
+                }
+            } else {
+                pm.fill(Color::from_rgba8(12, 14, 22, 255));
             }
-        }
-        let mut scrim = Paint::default();
-        scrim.set_color(with_alpha(Color::from_rgba8(10, 11, 18, 206), a));
-        if let Some(r) = Rect::from_xywh(0.0, 0.0, sw, sh) {
-            pm.fill_rect(r, &scrim, Transform::identity(), None);
+        } else {
+            let mut scrim = Paint::default();
+            scrim.set_color(with_alpha(Color::from_rgba8(10, 12, 20, 228), a));
+            if let Some(r) = Rect::from_xywh(0.0, 0.0, sw, sh) {
+                pm.fill_rect(r, &scrim, Transform::identity(), None);
+            }
         }
 
         // Left Sidebar

@@ -49,6 +49,9 @@ enum PendingJavaCall {
     PromptWeatherCity(String),
     FetchWeather(bool, String),
     SavePrefs,
+    SaveCcKeybind(i32, i32),
+    ResetKeybinds,
+    RefreshBackgroundApps,
     Effect(SideEffect),
 }
 
@@ -61,6 +64,8 @@ struct SharedState {
     ok_pressed_at: Option<Instant>,
     ok_long_fired: bool,
     pending_calls: Vec<PendingJavaCall>,
+    frame_pm: Option<tiny_skia::Pixmap>,
+    last_win_dims: (u32, u32),
     last_frame_at: Option<Instant>,
     scene_dirty: bool,
     needs_redraw: bool,
@@ -85,6 +90,8 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         ok_pressed_at: None,
         ok_long_fired: false,
         pending_calls: Vec::new(),
+        frame_pm: None,
+        last_win_dims: (0, 0),
         last_frame_at: None,
         scene_dirty: true,
         needs_redraw: true,
@@ -253,16 +260,20 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     }
     st.screen_dims = (w as f32, h as f32);
 
-    unsafe {
-        ndk_sys::ANativeWindow_setBuffersGeometry(
-            window.ptr().as_ptr(),
-            w as i32,
-            h as i32,
-            ndk_sys::ANativeWindow_LegacyFormat::WINDOW_FORMAT_RGBA_8888.0 as i32,
-        );
+    if st.last_win_dims != (w, h) || st.frame_pm.is_none() {
+        unsafe {
+            ndk_sys::ANativeWindow_setBuffersGeometry(
+                window.ptr().as_ptr(),
+                w as i32,
+                h as i32,
+                ndk_sys::ANativeWindow_LegacyFormat::WINDOW_FORMAT_RGBA_8888.0 as i32,
+            );
+        }
+        st.frame_pm = tiny_skia::Pixmap::new(w, h);
+        st.last_win_dims = (w, h);
     }
 
-    let mut pixmap = match Pixmap::new(w, h) {
+    let mut pixmap = match st.frame_pm.take() {
         Some(p) => p,
         None => return false,
     };
@@ -270,10 +281,18 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
     let now = Instant::now();
     let dt = st
         .last_frame_at
-        .map(|prev| prev.elapsed().as_secs_f32().clamp(0.004, 0.045))
+        .map(|prev| prev.elapsed().as_secs_f32().clamp(0.008, 0.14))
         .unwrap_or(1.0 / 60.0);
     let animating = st.ui.tick_animations(dt);
     st.last_frame_at = if animating { Some(now) } else { None };
+
+    st.ui.cc_key_label = st.mapper.cc_key_label.clone();
+    st.ui.capture_prompt = match st.mapper.capture_target {
+        CaptureTarget::VoiceAssistant => Some("Voice Assistant"),
+        CaptureTarget::ControlCenter => Some("Control Center"),
+        CaptureTarget::None => None,
+    };
+
     let (time_str, greeting_str, date_str) =
         format_clock_greeting_date(st.tz_offset_ms, &st.ui.user_name, st.ui.clock_24h, st.ui.lang_code);
     let key_label = st.mapper.voice_key_label.clone();
@@ -296,15 +315,20 @@ fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
             };
             let src_bytes = pixmap.data();
             let row_bytes = (w as usize) * 4;
-            for y in 0..(h as usize) {
-                let src_off = y * row_bytes;
-                let dst_off = y * stride_px * 4;
-                dst_bytes[dst_off..dst_off + row_bytes]
-                    .copy_from_slice(&src_bytes[src_off..src_off + row_bytes]);
+            if stride_px == w as usize {
+                dst_bytes[..row_bytes * (h as usize)].copy_from_slice(src_bytes);
+            } else {
+                for y in 0..(h as usize) {
+                    let src_off = y * row_bytes;
+                    let dst_off = y * stride_px * 4;
+                    dst_bytes[dst_off..dst_off + row_bytes]
+                        .copy_from_slice(&src_bytes[src_off..src_off + row_bytes]);
+                }
             }
         }
     }
 
+    st.frame_pm = Some(pixmap);
     st.needs_redraw = animating;
     animating
 }
@@ -444,6 +468,20 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                             );
                         }
                     }
+                    PendingJavaCall::SaveCcKeybind(kc, sc) => {
+                        let _ = env.call_method(
+                            &act_obj,
+                            "saveCcKeybindFromRust",
+                            "(II)V",
+                            &[JValue::Int(kc), JValue::Int(sc)],
+                        );
+                    }
+                    PendingJavaCall::ResetKeybinds => {
+                        let _ = env.call_method(&act_obj, "resetKeybindsFromRust", "()V", &[]);
+                    }
+                    PendingJavaCall::RefreshBackgroundApps => {
+                        let _ = env.call_method(&act_obj, "refreshBackgroundAppsFromRust", "()V", &[]);
+                    }
                     PendingJavaCall::Effect(eff) => match eff {
                         SideEffect::None => {}
                         SideEffect::OpenWifiSettings => {
@@ -521,6 +559,16 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                                 );
                             }
                         }
+                        SideEffect::OpenMemoryApps => {
+                            let _ = env.call_method(&act_obj, "refreshBackgroundAppsFromRust", "()V", &[]);
+                            let _ = env.call_method(&act_obj, "refreshSystemSnapshot", "()V", &[]);
+                        }
+                        SideEffect::ToggleDnd => {
+                            let _ = env.call_method(&act_obj, "toggleDndFromRust", "()V", &[]);
+                        }
+                        SideEffect::StartCaptureVoice
+                        | SideEffect::StartCaptureControlCenter
+                        | SideEffect::ResetKeybinds => {}
                         SideEffect::SavePrefs => {
                             if let (Ok(jn), Ok(jl), Ok(jc)) = (
                                 env.new_string(&st.ui.user_name),
@@ -663,6 +711,55 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeUpdateWeather(
 }
 
 #[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetBackgroundApps(
+    mut env: JNIEnv,
+    _class: JClass,
+    packages: JObjectArray,
+    running_flags: JBooleanArray,
+) {
+    let len = env.get_array_length(&packages).unwrap_or(0).max(0) as usize;
+    let mut run_buf = vec![0u8; len];
+    let _ = env.get_boolean_array_region(&running_flags, 0, &mut run_buf);
+    let mut list = Vec::with_capacity(len);
+    for i in 0..len {
+        let pkg = env
+            .get_object_array_element(&packages, i as i32)
+            .ok()
+            .and_then(|o| env.get_string(&JString::from(o)).ok())
+            .map(|s| -> String { s.into() })
+            .unwrap_or_default();
+        if !pkg.is_empty() {
+            list.push((pkg, run_buf.get(i).copied().unwrap_or(0) != 0));
+        }
+    }
+    if let Ok(mut st) = STATE.lock() {
+        st.ui.recent_cleared = false;
+        st.ui.recent_pkgs = list;
+        if !st.ui.recent_pkgs.is_empty() {
+            st.ui.recent_selected = st.ui.recent_selected.min(st.ui.recent_pkgs.len() - 1);
+        } else {
+            st.ui.recent_selected = 0;
+        }
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeLoadKeybinds(
+    _env: JNIEnv,
+    _class: JClass,
+    vkc: jint,
+    vsc: jint,
+    cckc: jint,
+    ccsc: jint,
+) {
+    if let Ok(mut st) = STATE.lock() {
+        st.mapper.load_saved_bindings(vkc, vsc, cckc, ccsc);
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnHomePressed(
     _env: JNIEnv,
     _class: JClass,
@@ -681,16 +778,30 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeOnRemoteKey(
     scan_code: jint,
 ) {
     if let Ok(mut st) = STATE.lock() {
-        if let Some(act) = st.mapper.on_raw_key(key_code, scan_code) {
-            apply_bound_action(&mut st, act);
-        }
-        if let Some((vkc, vsc)) = st.mapper.captured_voice_pair.take() {
-            st.pending_calls.push(PendingJavaCall::SaveVoiceKeybind(vkc, vsc));
+        if let Some((target, desc)) = st.mapper.try_capture_key(key_code, scan_code) {
+            match target {
+                CaptureTarget::VoiceAssistant => {
+                    if let Some((vkc, vsc)) = st.mapper.captured_voice_pair.take() {
+                        st.pending_calls.push(PendingJavaCall::SaveVoiceKeybind(vkc, vsc));
+                    }
+                    st.ui.settings.status_banner = Some(format!("Bound Voice Assistant to {}", desc));
+                }
+                CaptureTarget::ControlCenter => {
+                    if let Some((ckc, csc)) = st.mapper.captured_cc_pair.take() {
+                        st.pending_calls.push(PendingJavaCall::SaveCcKeybind(ckc, csc));
+                    }
+                    st.ui.settings.status_banner = Some(format!("Bound Control Center to {}", desc));
+                }
+                CaptureTarget::None => {}
+            }
             st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
-        } else if st.mapper.capture_target == CaptureTarget::None {
-            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+            st.request_redraw();
+            return;
         }
-        st.request_redraw();
+        if let Some(bound) = st.mapper.lookup_action(key_code, scan_code) {
+            apply_bound_action(&mut st, bound);
+            st.request_redraw();
+        }
     }
 }
 
@@ -1013,7 +1124,7 @@ fn execute_setup_action(st: &mut SharedState, action_id: &str) {
         }
         "setup_capture_cc" => {
             st.mapper.capture_target = CaptureTarget::ControlCenter;
-            st.mapper.last_captured_label = "Press remote button now...".into();
+            st.mapper.cc_key_label = "Press remote button now...".into();
             st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
         }
         "setup_default_home" => {
@@ -1046,6 +1157,7 @@ fn activate_ok_press(st: &mut SharedState, row_count: usize) {
             &st.ui.weather_city,
             st.ui.classic_look,
             &st.mapper.voice_key_label,
+            &st.mapper.cc_key_label,
             st.ui.sys.default_home,
             st.ui.sys.a11y_enabled,
         );
@@ -1104,7 +1216,7 @@ fn activate_ok_press(st: &mut SharedState, row_count: usize) {
                     st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
                 } else if item.action_id == "capture_cc_key" {
                     st.mapper.capture_target = CaptureTarget::ControlCenter;
-                    st.mapper.last_captured_label = "Press remote button now…".into();
+                    st.mapper.cc_key_label = "Press remote button now…".into();
                     st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
                 } else if let Some(rest) = item.action_id.strip_prefix("unhide:") {
                     if let Ok(hidx) = rest.parse::<usize>() {
@@ -1117,7 +1229,11 @@ fn activate_ok_press(st: &mut SharedState, row_count: usize) {
                     if dirty {
                         st.scene_dirty = true;
                     }
-                    if eff != SideEffect::None {
+                    if eff == SideEffect::ResetKeybinds {
+                        st.mapper.reset_defaults();
+                        st.ui.settings.status_banner = Some("Keybinds reset to defaults.".into());
+                        st.pending_calls.push(PendingJavaCall::ResetKeybinds);
+                    } else if eff != SideEffect::None {
                         st.pending_calls.push(PendingJavaCall::Effect(eff));
                     }
                 }
@@ -1129,13 +1245,9 @@ fn activate_ok_press(st: &mut SharedState, row_count: usize) {
             st.pending_calls.push(PendingJavaCall::Effect(eff));
         }
     } else if st.ui.recent_apps_open {
-        let app_count = st.ui.apps.len().saturating_sub(1);
-        if app_count > 0 {
-            let idx = st.ui.recent_selected % app_count;
-            if let Some(tile) = st.ui.apps.get(idx) {
-                st.ui.recent_apps_open = false;
-                st.pending_calls.push(PendingJavaCall::LaunchPkg(tile.package_name.clone()));
-            }
+        if let Some(pkg) = st.ui.selected_recent_pkg() {
+            st.ui.recent_apps_open = false;
+            st.pending_calls.push(PendingJavaCall::LaunchPkg(pkg));
         }
     } else if st.ui.weather_popup_open {
         st.ui.weather_popup_open = false;
@@ -1187,19 +1299,41 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
         return false;
     }
 
-    if let Some(bound) = st.mapper.on_raw_key(kc, sc) {
+    if st.mapper.capture_target != CaptureTarget::None {
+        if kc == AKEYCODE_BACK {
+            st.mapper.capture_target = CaptureTarget::None;
+            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+            st.ui.settings.status_banner = Some("Keybind capture cancelled.".into());
+            st.needs_redraw = true;
+            return true;
+        }
+        if let Some((target, desc)) = st.mapper.try_capture_key(kc, sc) {
+            match target {
+                CaptureTarget::VoiceAssistant => {
+                    if let Some((vkc, vsc)) = st.mapper.captured_voice_pair.take() {
+                        st.pending_calls.push(PendingJavaCall::SaveVoiceKeybind(vkc, vsc));
+                    }
+                    st.ui.settings.status_banner = Some(format!("Bound Voice Assistant to {}", desc));
+                }
+                CaptureTarget::ControlCenter => {
+                    if let Some((ckc, csc)) = st.mapper.captured_cc_pair.take() {
+                        st.pending_calls.push(PendingJavaCall::SaveCcKeybind(ckc, csc));
+                    }
+                    st.ui.settings.status_banner = Some(format!("Bound Control Center to {}", desc));
+                }
+                CaptureTarget::None => {}
+            }
+            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
+            st.needs_redraw = true;
+            return true;
+        }
+        return true;
+    }
+
+    if let Some(bound) = st.mapper.lookup_action(kc, sc) {
         apply_bound_action(st, bound);
         st.needs_redraw = true;
         return true;
-    }
-    if let Some((vkc, vsc)) = st.mapper.captured_voice_pair.take() {
-        st.pending_calls.push(PendingJavaCall::SaveVoiceKeybind(vkc, vsc));
-        st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
-        st.needs_redraw = true;
-        return true;
-    }
-    if st.mapper.capture_target == CaptureTarget::None && repeat_count == 0 {
-        st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(false));
     }
 
     let row_count = if st.ui.settings.open {
@@ -1222,6 +1356,7 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
                 &st.ui.weather_city,
                 st.ui.classic_look,
                 &st.mapper.voice_key_label,
+                &st.mapper.cc_key_label,
                 st.ui.sys.default_home,
                 st.ui.sys.a11y_enabled,
             )
@@ -1283,12 +1418,8 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
         }
         AKEYCODE_DPAD_UP => {
             if st.ui.recent_apps_open {
-                let app_count = st.ui.apps.len().saturating_sub(1);
-                if app_count > 0 {
-                    let idx = st.ui.recent_selected % app_count;
-                    if let Some(tile) = st.ui.apps.get(idx) {
-                        st.pending_calls.push(PendingJavaCall::KillPkg(tile.package_name.clone()));
-                    }
+                if let Some(pkg) = st.ui.close_selected_recent_app() {
+                    st.pending_calls.push(PendingJavaCall::KillPkg(pkg));
                 }
             } else {
                 st.ui.move_dpad(0, -1, row_count);
@@ -1297,7 +1428,12 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
             true
         }
         AKEYCODE_DPAD_DOWN => {
-            st.ui.move_dpad(0, 1, row_count);
+            if st.ui.recent_apps_open {
+                st.ui.clear_all_recent_apps();
+                st.pending_calls.push(PendingJavaCall::Effect(SideEffect::CleanMemoryNow));
+            } else {
+                st.ui.move_dpad(0, 1, row_count);
+            }
             st.needs_redraw = true;
             true
         }
@@ -1484,7 +1620,7 @@ pub fn android_main(app: AndroidApp) {
         let timeout = {
             let st = STATE.lock().unwrap();
             if st.needs_redraw {
-                Some(Duration::from_millis(16))
+                Some(Duration::from_millis(1))
             } else if let Some(down_at) = st.ok_pressed_at {
                 if !st.ok_long_fired {
                     let elapsed = down_at.elapsed();
@@ -1595,6 +1731,7 @@ pub fn android_main(app: AndroidApp) {
                                         &st.ui.weather_city,
                                         st.ui.classic_look,
                                         &st.mapper.voice_key_label,
+                                        &st.mapper.cc_key_label,
                                         st.ui.sys.default_home,
                                         st.ui.sys.a11y_enabled,
                                     );
@@ -1655,8 +1792,24 @@ pub fn android_main(app: AndroidApp) {
                                 if let Some(p) = pkg {
                                     st.pending_calls.push(PendingJavaCall::LaunchPkg(p));
                                 }
-                                if eff != SideEffect::None {
-                                    st.pending_calls.push(PendingJavaCall::Effect(eff));
+                                match eff {
+                                    SideEffect::StartCaptureVoice => {
+                                        st.mapper.capture_target = CaptureTarget::VoiceAssistant;
+                                        st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
+                                    }
+                                    SideEffect::StartCaptureControlCenter => {
+                                        st.mapper.capture_target = CaptureTarget::ControlCenter;
+                                        st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
+                                    }
+                                    SideEffect::ResetKeybinds => {
+                                        st.mapper.reset_defaults();
+                                        st.ui.settings.status_banner = Some("Keybinds reset to defaults.".into());
+                                        st.pending_calls.push(PendingJavaCall::ResetKeybinds);
+                                    }
+                                    SideEffect::None => {}
+                                    other => {
+                                        st.pending_calls.push(PendingJavaCall::Effect(other));
+                                    }
                                 }
                                 st.needs_redraw = true;
                                 return InputStatus::Handled;

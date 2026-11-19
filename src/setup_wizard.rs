@@ -115,11 +115,10 @@ impl SetupWizard {
         self.pill_y_u = -1.0;
     }
 
-    pub fn tick(&mut self, dt: f32) -> bool {
+    pub fn tick(&mut self, dt: f32, animations_enabled: bool) -> bool {
         if !self.open {
             return false;
         }
-        let mut busy = smooth_to(&mut self.step_anim, 1.0, 12.0, dt, 0.003);
         let list_top_u = if self.step == 1 { 192.0 } else { 146.0 };
         let max_vis = 6usize;
         let start_idx = if self.selected >= max_vis {
@@ -129,9 +128,15 @@ impl SetupWizard {
         };
         let vis_sel = self.selected.saturating_sub(start_idx);
         let target_y_u = list_top_u + (vis_sel as f32) * 51.0;
+        if !animations_enabled {
+            self.step_anim = 1.0;
+            self.pill_y_u = target_y_u;
+            return false;
+        }
+        let mut busy = smooth_to(&mut self.step_anim, 1.0, 24.0, dt, 0.018);
         if self.pill_y_u < 0.0 {
             self.pill_y_u = target_y_u;
-        } else if smooth_to(&mut self.pill_y_u, target_y_u, 22.0, dt, 0.12) {
+        } else if smooth_to(&mut self.pill_y_u, target_y_u, 32.0, dt, 0.7) {
             busy = true;
         }
         busy
@@ -158,6 +163,7 @@ impl SetupWizard {
         weather_city: &str,
         classic_look: bool,
         voice_key_label: &str,
+        cc_key_label: &str,
         default_home: bool,
         a11y_enabled: bool,
     ) -> Vec<SetupOption> {
@@ -278,7 +284,7 @@ impl SetupWizard {
                 },
                 SetupOption {
                     title: "Bind Control Center Button...".into(),
-                    subtitle: Some("Optional shortcut for opening the Liquid Glass Control Center".into()),
+                    subtitle: Some(format!("Current: {}  (Press OK, then press remote key)", cc_key_label)),
                     checked: false,
                     action_id: "setup_capture_cc",
                 },
