@@ -62,11 +62,13 @@ public class RemoteFilterService extends AccessibilityService {
                 return true;
             }
 
-            SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
-            int customVoiceKc = sp.getInt("voice_key_code", -1);
-            int customVoiceSc = sp.getInt("voice_scan_code", -1);
-            boolean matchesCustomVoice = (customVoiceKc > 0 && kc == customVoiceKc)
-                    || (customVoiceSc > 0 && sc == customVoiceSc);
+            if (kc == KeyEvent.KEYCODE_BACK && VoiceAssistant.isActive()) {
+                VoiceAssistant.stopListening();
+                return true;
+            }
+
+            boolean matchesCustomVoice = (MainActivity.cachedVoiceKc > 0 && kc == MainActivity.cachedVoiceKc)
+                    || (MainActivity.cachedVoiceSc > 0 && sc == MainActivity.cachedVoiceSc);
 
             boolean isDefaultVoiceKey = (kc == KeyEvent.KEYCODE_UNKNOWN && sc > 0)
                     || kc == KeyEvent.KEYCODE_VOICE_ASSIST

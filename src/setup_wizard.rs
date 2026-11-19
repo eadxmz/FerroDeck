@@ -133,10 +133,10 @@ impl SetupWizard {
             self.pill_y_u = target_y_u;
             return false;
         }
-        let mut busy = smooth_to(&mut self.step_anim, 1.0, 24.0, dt, 0.018);
+        let mut busy = smooth_to(&mut self.step_anim, 1.0, 28.0, dt, 0.025);
         if self.pill_y_u < 0.0 {
             self.pill_y_u = target_y_u;
-        } else if smooth_to(&mut self.pill_y_u, target_y_u, 32.0, dt, 0.7) {
+        } else if smooth_to(&mut self.pill_y_u, target_y_u, 36.0, dt, 1.0) {
             busy = true;
         }
         busy
@@ -564,18 +564,18 @@ impl SetupWizard {
             if let Some(pill) = rounded_rect_path(card_x, ry, card_w, row_h, row_r) {
                 if self.step >= 2 {
                     if let Some(glass) = glass_bg {
-                        let sx = sw / glass.width() as f32;
-                        let sy = sh / glass.height() as f32;
-                        let mut gp = Paint::default();
-                        gp.anti_alias = true;
-                        gp.shader = Pattern::new(
-                            glass.as_ref(),
-                            SpreadMode::Pad,
-                            FilterQuality::Bilinear,
-                            0.85 * step_alpha,
-                            Transform::from_scale(sx, sy),
-                        );
-                        pm.fill_path(&pill, &gp, FillRule::Winding, Transform::identity(), None);
+                        if glass.width() == pm.width() && glass.height() == pm.height() {
+                            let mut gp = Paint::default();
+                            gp.anti_alias = true;
+                            gp.shader = Pattern::new(
+                                glass.as_ref(),
+                                SpreadMode::Pad,
+                                FilterQuality::Nearest,
+                                0.85 * step_alpha,
+                                Transform::identity(),
+                            );
+                            pm.fill_path(&pill, &gp, FillRule::Winding, Transform::identity(), None);
+                        }
                     }
                 }
                 let mut fill = Paint::default();

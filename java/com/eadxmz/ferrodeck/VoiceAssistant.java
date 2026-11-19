@@ -64,8 +64,33 @@ public final class VoiceAssistant {
     private static boolean isListening = false;
 
     private static final Runnable AUTO_HIDE_HUD = VoiceAssistant::hideHud;
+    private static final Runnable LISTEN_WATCHDOG = () -> {
+        if (isListening) {
+            stopListening();
+        }
+    };
 
     private VoiceAssistant() { }
+
+    public static boolean isActive() {
+        return isListening || overlayPill != null;
+    }
+
+    public static void stopListening() {
+        MAIN.post(() -> {
+            isListening = false;
+            MAIN.removeCallbacks(LISTEN_WATCHDOG);
+            stopAndDestroyRecognizer();
+            try {
+                if (activeTts != null) {
+                    activeTts.stop();
+                    activeTts.shutdown();
+                    activeTts = null;
+                }
+            } catch (Throwable ignored) { }
+            hideHud();
+        });
+    }
 
     public static void startListening(final Context rawCtx) {
         if (rawCtx == null) return;
@@ -73,8 +98,7 @@ public final class VoiceAssistant {
 
         MAIN.post(() -> {
             if (isListening) {
-                stopAndDestroyRecognizer();
-                hideHud();
+                stopListening();
                 return;
             }
 
@@ -99,8 +123,9 @@ public final class VoiceAssistant {
 
             stopAndDestroyRecognizer();
             isListening = true;
+            MAIN.removeCallbacks(LISTEN_WATCHDOG);
+            MAIN.postDelayed(LISTEN_WATCHDOG, 10000L);
             showHud(ctx, "Listening…", "Say \"Open YouTube\", search a video, or ask a question", 0L);
-            MainActivity.nativeSetVoiceHud(true, "Listening…", "Speak now…");
 
             try {
                 activeRecognizer = SpeechRecognizer.createSpeechRecognizer(ctx);
@@ -754,6 +779,20 @@ public final class VoiceAssistant {
     private static void showHud(Context ctx, String title, String sub, long autoHideMs) {
         MAIN.removeCallbacks(AUTO_HIDE_HUD);
         try {
+            MainActivity.nativeSetVoiceHud(true, title != null ? title : "", sub != null ? sub : "");
+        } catch (Throwable ignored) { }
+
+        // When FerroDeck is in the foreground, the native Rust Liquid Glass top pill renders cleanly
+        // with live blurred backdrop — no need for a duplicate Android overlay window on top.
+        if (MainActivity.isInForeground) {
+            removeOverlayWindowOnly();
+            if (autoHideMs > 0L) {
+                MAIN.postDelayed(AUTO_HIDE_HUD, autoHideMs);
+            }
+            return;
+        }
+
+        try {
             if (overlayPill == null) {
                 WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
                 if (wm == null) return;
@@ -762,23 +801,28 @@ public final class VoiceAssistant {
                 LinearLayout box = new LinearLayout(ctx);
                 box.setOrientation(LinearLayout.VERTICAL);
                 box.setGravity(Gravity.CENTER_HORIZONTAL);
-                box.setPadding(44, 24, 44, 24);
+                box.setPadding(48, 22, 48, 22);
 
-                GradientDrawable bg = new GradientDrawable();
-                bg.setColor(0xEB151924);
+                // Liquid Glass vertical specular gradient + translucent frosted base + crisp rim
+                GradientDrawable bg = new GradientDrawable(
+                        GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[]{0xD828344C, 0xCC131826});
                 bg.setCornerRadius(999f);
-                bg.setStroke(2, 0x55FFFFFF);
+                bg.setStroke(2, 0x88FFFFFF);
                 box.setBackground(bg);
+                if (Build.VERSION.SDK_INT >= 21) {
+                    box.setElevation(18f);
+                }
 
                 TextView t1 = new TextView(ctx);
                 t1.setTextColor(Color.WHITE);
-                t1.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f);
+                t1.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f);
                 t1.setGravity(Gravity.CENTER);
                 box.addView(t1);
 
                 TextView t2 = new TextView(ctx);
-                t2.setTextColor(0xFF93D5FF);
-                t2.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+                t2.setTextColor(0xFFB6DEFF);
+                t2.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
                 t2.setGravity(Gravity.CENTER);
                 t2.setMaxWidth(920);
                 box.addView(t2);
@@ -794,12 +838,12 @@ public final class VoiceAssistant {
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         type,
                         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                         PixelFormat.TRANSLUCENT);
                 lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-                lp.y = 42;
+                lp.y = 36;
 
+                box.setOnClickListener(v -> stopListening());
                 overlayPill = box;
                 overlayTitle = t1;
                 overlaySub = t2;
@@ -813,19 +857,21 @@ public final class VoiceAssistant {
     }
 
     private static void updateHud(String title, String sub) {
+        try {
+            MainActivity.nativeSetVoiceHud(true, title != null ? title : "", sub != null ? sub : "");
+        } catch (Throwable ignored) { }
         if (overlayTitle != null) overlayTitle.setText(title);
         if (overlaySub != null) {
             if (sub == null || sub.isEmpty()) {
                 overlaySub.setVisibility(android.view.View.GONE);
             } else {
                 overlaySub.setVisibility(android.view.View.VISIBLE);
-                overlaySub.setText(sub);
+                overlaySub.setText(sub + "  ·  Back to stop");
             }
         }
     }
 
-    public static void hideHud() {
-        MAIN.removeCallbacks(AUTO_HIDE_HUD);
+    private static void removeOverlayWindowOnly() {
         try {
             if (overlayWm != null && overlayPill != null) {
                 overlayWm.removeView(overlayPill);
@@ -834,5 +880,14 @@ public final class VoiceAssistant {
         overlayPill = null;
         overlayTitle = null;
         overlaySub = null;
+    }
+
+    public static void hideHud() {
+        MAIN.removeCallbacks(AUTO_HIDE_HUD);
+        MAIN.removeCallbacks(LISTEN_WATCHDOG);
+        removeOverlayWindowOnly();
+        try {
+            MainActivity.nativeSetVoiceHud(false, "", "");
+        } catch (Throwable ignored) { }
     }
 }

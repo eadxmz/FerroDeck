@@ -2272,8 +2272,8 @@ impl LauncherUi {
             );
             self.setup.draw(
                 pm,
-                self.wallpaper_pm.as_ref(),
-                self.glass_backdrop_pm.as_ref(),
+                self.cached_scene_pm.as_ref().or(self.wallpaper_pm.as_ref()),
+                self.cached_glass_screen_pm.as_ref().or(self.glass_backdrop_pm.as_ref()),
                 unit,
                 &setup_opts,
                 &self.user_name,
@@ -2983,17 +2983,15 @@ impl LauncherUi {
         let icon_r = (11.0 * unit).round();
 
         if let Some(dock_path) = rounded_rect_path(dock_x, dock_y, dock_w, dock_h, dock_r) {
-            if let Some(ref glass) = self.glass_backdrop_pm {
-                let sx = sw / glass.width() as f32;
-                let sy = sh / glass.height() as f32;
+            if let Some(ref glass) = self.cached_glass_screen_pm {
                 let mut gp = Paint::default();
                 gp.anti_alias = true;
                 gp.shader = Pattern::new(
                     glass.as_ref(),
                     SpreadMode::Pad,
-                    FilterQuality::Bilinear,
+                    FilterQuality::Nearest,
                     0.92,
-                    Transform::from_scale(sx, sy),
+                    Transform::identity(),
                 );
                 pm.fill_path(&dock_path, &gp, FillRule::Winding, Transform::identity(), None);
             }
@@ -3316,17 +3314,15 @@ impl LauncherUi {
 
         // True Liquid Glass card: live blurred glass backdrop + frosted tint + top specular sheen + crisp rim
         if let Some(card) = rounded_rect_path(px, py, panel_w, panel_h, card_r) {
-            if let Some(ref glass) = self.glass_backdrop_pm {
-                let sx = sw / glass.width() as f32;
-                let sy = sh / glass.height() as f32;
+            if let Some(ref glass) = self.cached_glass_screen_pm {
                 let mut gp = Paint::default();
                 gp.anti_alias = true;
                 gp.shader = Pattern::new(
                     glass.as_ref(),
                     SpreadMode::Pad,
-                    FilterQuality::Bilinear,
+                    FilterQuality::Nearest,
                     0.96 * a,
-                    Transform::from_scale(sx, sy),
+                    Transform::identity(),
                 );
                 pm.fill_path(&card, &gp, FillRule::Winding, Transform::identity(), None);
             }
@@ -3616,70 +3612,165 @@ impl LauncherUi {
 
     fn draw_key_capture_modal(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32, target_name: &str) {
         let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(6, 8, 14, 150));
+        scrim.set_color(Color::from_rgba8(6, 8, 14, 118));
         if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
-        let cw = (390.0 * unit).round();
-        let ch = (144.0 * unit).round();
+
+        let cw = (368.0 * unit).round();
+        let ch = (182.0 * unit).round();
         let cx = ((sw - cw) * 0.5).round();
         let cy = ((sh - ch) * 0.5).round();
-        if let Some(card) = rounded_rect_path(cx, cy, cw, ch, 22.0 * unit) {
-            let mut bg = Paint::default();
-            bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(22, 26, 40, 242));
-            pm.fill_path(&card, &bg, FillRule::Winding, Transform::identity(), None);
+        let card_r = (26.0 * unit).round();
+
+        // Soft drop shadow
+        if let Some(shadow) = rounded_rect_path(
+            cx - 3.0 * unit,
+            cy + 8.0 * unit,
+            cw + 6.0 * unit,
+            ch + 6.0 * unit,
+            card_r + 3.0 * unit,
+        ) {
+            let mut sp = Paint::default();
+            sp.anti_alias = true;
+            sp.set_color(Color::from_rgba8(0, 0, 0, 120));
+            pm.fill_path(&shadow, &sp, FillRule::Winding, Transform::identity(), None);
+        }
+
+        // True Liquid Glass card (1:1 blurred backdrop + frosted tint + top sheen + crisp white rim)
+        if let Some(card) = rounded_rect_path(cx, cy, cw, ch, card_r) {
+            if let Some(ref glass) = self.cached_glass_screen_pm {
+                let mut gp = Paint::default();
+                gp.anti_alias = true;
+                gp.shader = Pattern::new(
+                    glass.as_ref(),
+                    SpreadMode::Pad,
+                    FilterQuality::Nearest,
+                    0.96,
+                    Transform::identity(),
+                );
+                pm.fill_path(&card, &gp, FillRule::Winding, Transform::identity(), None);
+            }
+
+            let mut frost = Paint::default();
+            frost.anti_alias = true;
+            frost.set_color(Color::from_rgba8(20, 24, 38, 146));
+            pm.fill_path(&card, &frost, FillRule::Winding, Transform::identity(), None);
+
+            if let Some(sheen) = LinearGradient::new(
+                Point::from_xy(cx, cy),
+                Point::from_xy(cx, cy + ch * 0.48),
+                vec![
+                    GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 42)),
+                    GradientStop::new(1.0, Color::from_rgba8(255, 255, 255, 0)),
+                ],
+                SpreadMode::Pad,
+                Transform::identity(),
+            ) {
+                let mut sp = Paint::default();
+                sp.anti_alias = true;
+                sp.shader = sheen;
+                pm.fill_path(&card, &sp, FillRule::Winding, Transform::identity(), None);
+            }
+
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(120, 195, 255, 190));
+            rim.set_color(Color::from_rgba8(255, 255, 255, 132));
             pm.stroke_path(
                 &card,
                 &rim,
                 &Stroke {
-                    width: (1.5 * unit).max(1.2),
+                    width: (1.3 * unit).max(1.0),
                     ..Default::default()
                 },
                 Transform::identity(),
                 None,
             );
         }
+
+        // Top glowing frosted icon badge
+        let badge_sz = (40.0 * unit).round();
+        let bx = ((sw - badge_sz) * 0.5).round();
+        let by = (cy + 18.0 * unit).round();
+        if let Some(bp) = rounded_rect_path(bx, by, badge_sz, badge_sz, badge_sz * 0.5) {
+            let mut fill = Paint::default();
+            fill.anti_alias = true;
+            fill.set_color(Color::from_rgba8(255, 255, 255, 32));
+            pm.fill_path(&bp, &fill, FillRule::Winding, Transform::identity(), None);
+            let mut rim = Paint::default();
+            rim.anti_alias = true;
+            rim.set_color(Color::from_rgba8(255, 255, 255, 108));
+            pm.stroke_path(&bp, &rim, &Stroke { width: 1.0, ..Default::default() }, Transform::identity(), None);
+        }
+        let g_sz = (20.0 * unit).round();
+        let glyph = if target_name.contains("Control") {
+            Glyph::Sliders
+        } else {
+            Glyph::Remote
+        };
+        draw_glyph(
+            pm,
+            glyph,
+            bx + (badge_sz - g_sz) * 0.5,
+            by + (badge_sz - g_sz) * 0.5,
+            g_sz,
+            Color::from_rgba8(246, 250, 255, 250),
+        );
+
         let title = format!("Bind {} Button", target_name);
-        let tpx = (16.5 * unit).round();
+        let tpx = (15.5 * unit).round();
         let tw = measure_label_width(self.font_medium.as_ref(), &title, tpx);
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
             &title,
             ((sw - tw) * 0.5).round() as i32,
-            (cy + 42.0 * unit) as i32,
+            (cy + 84.0 * unit) as i32,
             tpx,
             Color::from_rgba8(255, 255, 255, 252),
-            false,
+            true,
         );
-        let msg = "Press any button on your remote or keyboard now...";
-        let mpx = (12.2 * unit).round();
+
+        let msg = "Press any button on your remote or keyboard";
+        let mpx = (11.5 * unit).round();
         let mw = measure_label_width(self.font_regular.as_ref(), msg, mpx);
         draw_crisp_label(
             pm,
             self.font_regular.as_ref(),
             msg,
             ((sw - mw) * 0.5).round() as i32,
-            (cy + 78.0 * unit) as i32,
+            (cy + 109.0 * unit) as i32,
             mpx,
-            Color::from_rgba8(155, 215, 255, 245),
+            Color::from_rgba8(210, 224, 244, 232),
             false,
         );
-        let hint = "Press Back to cancel  ·  Arrows / OK / Home are reserved";
+
+        // Frosted stadium pill footer hint
+        let hint = "Press Back to cancel";
         let hpx = (10.2 * unit).round();
-        let hw = measure_label_width(self.font_regular.as_ref(), hint, hpx);
+        let hw = measure_label_width(self.font_medium.as_ref(), hint, hpx);
+        let pw = (hw + 26.0 * unit).round();
+        let ph = (24.0 * unit).round();
+        let px = ((sw - pw) * 0.5).round();
+        let py = (cy + ch - ph - 16.0 * unit).round();
+        if let Some(hp) = rounded_rect_path(px, py, pw, ph, ph * 0.5) {
+            let mut fill = Paint::default();
+            fill.anti_alias = true;
+            fill.set_color(Color::from_rgba8(255, 255, 255, 24));
+            pm.fill_path(&hp, &fill, FillRule::Winding, Transform::identity(), None);
+            let mut rim = Paint::default();
+            rim.anti_alias = true;
+            rim.set_color(Color::from_rgba8(255, 255, 255, 64));
+            pm.stroke_path(&hp, &rim, &Stroke { width: 1.0, ..Default::default() }, Transform::identity(), None);
+        }
         draw_crisp_label(
             pm,
-            self.font_regular.as_ref(),
+            self.font_medium.as_ref(),
             hint,
             ((sw - hw) * 0.5).round() as i32,
-            (cy + 114.0 * unit) as i32,
+            (py + ph * 0.67) as i32,
             hpx,
-            Color::from_rgba8(185, 196, 215, 215),
+            Color::from_rgba8(238, 244, 254, 235),
             false,
         );
     }
@@ -3688,46 +3779,118 @@ impl LauncherUi {
         let Some((ref title, ref sub)) = self.voice_hud else {
             return;
         };
-        let text = if sub.is_empty() {
+        let main_txt = if sub.is_empty() {
             title.clone()
         } else {
             format!("{}  ·  {}", title, sub)
         };
-        let fpx = (12.0 * unit).round();
-        let tw = measure_label_width(self.font_medium.as_ref(), &text, fpx);
-        let pill_w = (tw + 36.0 * unit).min(sw - 60.0 * unit).round();
-        let pill_h = (32.0 * unit).round();
+        let stop_hint = "  ·  Back to stop";
+        let full_txt = format!("{}{}", main_txt, stop_hint);
+        let fpx = (11.8 * unit).round();
+        let tw = measure_label_width(self.font_medium.as_ref(), &full_txt, fpx);
+        let dot_space = (22.0 * unit).round();
+        let pill_w = (tw + dot_space + 34.0 * unit).min(sw - 48.0 * unit).round();
+        let pill_h = (36.0 * unit).round();
         let px = ((sw - pill_w) * 0.5).round();
-        let py = (20.0 * unit).round();
+        let py = (18.0 * unit).round();
+        let pill_r = pill_h * 0.5;
 
-        if let Some(pill) = rounded_rect_path(px, py, pill_w, pill_h, pill_h * 0.5) {
-            let mut bg = Paint::default();
-            bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(18, 24, 38, 242));
-            pm.fill_path(&pill, &bg, FillRule::Winding, Transform::identity(), None);
+        // Soft drop shadow
+        if let Some(sh) = rounded_rect_path(px - 2.0 * unit, py + 4.0 * unit, pill_w + 4.0 * unit, pill_h + 2.0 * unit, pill_r) {
+            let mut sp = Paint::default();
+            sp.anti_alias = true;
+            sp.set_color(Color::from_rgba8(0, 0, 0, 96));
+            pm.fill_path(&sh, &sp, FillRule::Winding, Transform::identity(), None);
+        }
+
+        // Liquid Glass stadium pill
+        if let Some(pill) = rounded_rect_path(px, py, pill_w, pill_h, pill_r) {
+            if let Some(ref glass) = self.cached_glass_screen_pm {
+                let mut gp = Paint::default();
+                gp.anti_alias = true;
+                gp.shader = Pattern::new(
+                    glass.as_ref(),
+                    SpreadMode::Pad,
+                    FilterQuality::Nearest,
+                    0.96,
+                    Transform::identity(),
+                );
+                pm.fill_path(&pill, &gp, FillRule::Winding, Transform::identity(), None);
+            }
+            let mut frost = Paint::default();
+            frost.anti_alias = true;
+            frost.set_color(Color::from_rgba8(18, 24, 38, 148));
+            pm.fill_path(&pill, &frost, FillRule::Winding, Transform::identity(), None);
+
+            if let Some(sheen) = LinearGradient::new(
+                Point::from_xy(px, py),
+                Point::from_xy(px, py + pill_h * 0.55),
+                vec![
+                    GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 44)),
+                    GradientStop::new(1.0, Color::from_rgba8(255, 255, 255, 0)),
+                ],
+                SpreadMode::Pad,
+                Transform::identity(),
+            ) {
+                let mut sp = Paint::default();
+                sp.anti_alias = true;
+                sp.shader = sheen;
+                pm.fill_path(&pill, &sp, FillRule::Winding, Transform::identity(), None);
+            }
 
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(72, 168, 255, 220));
+            rim.set_color(Color::from_rgba8(255, 255, 255, 136));
             pm.stroke_path(
                 &pill,
                 &rim,
                 &Stroke {
-                    width: 1.5,
+                    width: (1.25 * unit).max(1.0),
                     ..Default::default()
                 },
                 Transform::identity(),
                 None,
             );
         }
+
+        // Glowing cyan listening indicator dot
+        let dot_r = (4.5 * unit).round();
+        let dot_x = (px + 15.0 * unit).round();
+        let dot_y = (py + pill_h * 0.5 - dot_r).round();
+        if let Some(glow) = rounded_rect_path(dot_x - 2.0 * unit, dot_y - 2.0 * unit, dot_r * 2.0 + 4.0 * unit, dot_r * 2.0 + 4.0 * unit, dot_r + 2.0 * unit) {
+            let mut gp = Paint::default();
+            gp.anti_alias = true;
+            gp.set_color(Color::from_rgba8(82, 192, 255, 88));
+            pm.fill_path(&glow, &gp, FillRule::Winding, Transform::identity(), None);
+        }
+        if let Some(dot) = rounded_rect_path(dot_x, dot_y, dot_r * 2.0, dot_r * 2.0, dot_r) {
+            let mut dp = Paint::default();
+            dp.anti_alias = true;
+            dp.set_color(Color::from_rgba8(105, 210, 255, 255));
+            pm.fill_path(&dot, &dp, FillRule::Winding, Transform::identity(), None);
+        }
+
+        let main_w = measure_label_width(self.font_medium.as_ref(), &main_txt, fpx);
+        let tx = (px + 15.0 * unit + dot_space) as i32;
+        let ty = (py + pill_h * 0.65) as i32;
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
-            &text,
-            (px + 18.0 * unit) as i32,
-            (py + pill_h * 0.66) as i32,
+            &main_txt,
+            tx,
+            ty,
             fpx,
-            Color::from_rgba8(255, 255, 255, 250),
+            Color::from_rgba8(255, 255, 255, 252),
+            true,
+        );
+        draw_crisp_label(
+            pm,
+            self.font_regular.as_ref(),
+            stop_hint,
+            tx + main_w.round() as i32,
+            ty,
+            (10.5 * unit).round(),
+            Color::from_rgba8(185, 210, 240, 215),
             false,
         );
     }

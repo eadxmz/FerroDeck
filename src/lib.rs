@@ -44,6 +44,7 @@ enum PendingJavaCall {
     UninstallApp(String),
     DisableApp(String),
     StartVoiceAssistant,
+    StopVoiceAssistant,
     SearchInPackage(String, String),
     PromptProfileName(String),
     PromptWeatherCity(String),
@@ -60,6 +61,7 @@ struct SharedState {
     mapper: RemoteMapper,
     waker: Option<AndroidAppWaker>,
     tz_offset_ms: i64,
+    raw_win_dims: (f32, f32),
     screen_dims: (f32, f32),
     ok_pressed_at: Option<Instant>,
     ok_long_fired: bool,
@@ -86,7 +88,8 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         mapper: RemoteMapper::new(),
         waker: None,
         tz_offset_ms: 0,
-        screen_dims: (1920.0, 1080.0),
+        raw_win_dims: (1920.0, 1080.0),
+        screen_dims: (1280.0, 720.0),
         ok_pressed_at: None,
         ok_long_fired: false,
         pending_calls: Vec::new(),
@@ -253,11 +256,20 @@ fn format_clock_greeting_date(
 }
 
 fn render_window(window: &NativeWindow, st: &mut SharedState) -> bool {
-    let w = window.width() as u32;
-    let h = window.height() as u32;
-    if w == 0 || h == 0 {
+    let raw_w = window.width() as u32;
+    let raw_h = window.height() as u32;
+    if raw_w == 0 || raw_h == 0 {
         return false;
     }
+    st.raw_win_dims = (raw_w as f32, raw_h as f32);
+
+    const MAX_BUF_W: u32 = 1280;
+    let (w, h) = if raw_w > MAX_BUF_W {
+        let scaled_h = (((raw_h as u64 * MAX_BUF_W as u64) / raw_w as u64) as u32).max(2) & !1;
+        (MAX_BUF_W, scaled_h)
+    } else {
+        (raw_w, raw_h)
+    };
     st.screen_dims = (w as f32, h as f32);
 
     if st.last_win_dims != (w, h) || st.frame_pm.is_none() {
@@ -414,6 +426,9 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                     }
                     PendingJavaCall::StartVoiceAssistant => {
                         let _ = env.call_method(&act_obj, "startVoiceAssistantFromRust", "()V", &[]);
+                    }
+                    PendingJavaCall::StopVoiceAssistant => {
+                        let _ = env.call_method(&act_obj, "stopVoiceAssistantFromRust", "()V", &[]);
                     }
                     PendingJavaCall::SearchInPackage(pkg, q) => {
                         if let (Ok(jp), Ok(jq)) = (env.new_string(&pkg), env.new_string(&q)) {
@@ -1275,18 +1290,12 @@ fn activate_ok_press(st: &mut SharedState, row_count: usize) {
 fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, repeat_count: i32) -> bool {
     if action == KeyAction::Up {
         if kc == AKEYCODE_DPAD_CENTER || kc == AKEYCODE_ENTER {
+            let was_deferred_dock = st.ok_pressed_at.is_some();
             let was_long = st.ok_long_fired;
             st.ok_pressed_at = None;
             st.ok_long_fired = false;
-            if !was_long {
-                let row_count = if st.ui.settings.open {
-                    st.ui
-                        .build_settings_rows(&st.mapper.voice_key_label, st.mapper.bound_count)
-                        .len()
-                } else {
-                    0
-                };
-                activate_ok_press(st, row_count);
+            if was_deferred_dock && !was_long {
+                activate_ok_press(st, 0);
                 st.needs_redraw = true;
             }
             return true;
@@ -1437,17 +1446,25 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
             true
         }
         AKEYCODE_DPAD_CENTER | AKEYCODE_ENTER => {
-            if repeat_count == 0 {
-                st.ok_pressed_at = Some(Instant::now());
-                st.ok_long_fired = false;
-            } else if !st.ok_long_fired
-                && !st.ui.setup.open
+            let on_dock_tile = !st.ui.setup.open
                 && !st.ui.app_menu.open
                 && !st.ui.search_ui.open
                 && !st.ui.settings.open
                 && !st.ui.control_center_open
-                && st.ui.focus_zone == FocusZone::Dock
-            {
+                && !st.ui.recent_apps_open
+                && !st.ui.weather_popup_open
+                && !st.ui.ambient_mode_open
+                && st.ui.focus_zone == FocusZone::Dock;
+            if !on_dock_tile {
+                if repeat_count == 0 {
+                    st.ok_pressed_at = None;
+                    st.ok_long_fired = false;
+                    activate_ok_press(st, row_count);
+                }
+            } else if repeat_count == 0 {
+                st.ok_pressed_at = Some(Instant::now());
+                st.ok_long_fired = false;
+            } else if !st.ok_long_fired {
                 st.ui.open_app_context_menu();
                 st.ok_long_fired = true;
             }
@@ -1482,7 +1499,10 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
             true
         }
         AKEYCODE_BACK => {
-            if st.ui.app_menu.open {
+            if st.ui.voice_hud.is_some() {
+                st.ui.voice_hud = None;
+                st.pending_calls.push(PendingJavaCall::StopVoiceAssistant);
+            } else if st.ui.app_menu.open {
                 st.ui.app_menu.open = false;
             } else if st.ui.search_ui.open {
                 st.ui.search_ui.open = false;
@@ -1619,7 +1639,7 @@ pub fn android_main(app: AndroidApp) {
         let timeout = {
             let st = STATE.lock().unwrap();
             if st.needs_redraw {
-                Some(Duration::from_millis(1))
+                Some(Duration::ZERO)
             } else if let Some(down_at) = st.ok_pressed_at {
                 if !st.ok_long_fired {
                     let elapsed = down_at.elapsed();
@@ -1710,9 +1730,17 @@ pub fn android_main(app: AndroidApp) {
                     InputEvent::MotionEvent(me) => {
                         if me.action() == MotionAction::Up {
                             if let Some(ptr) = me.pointers().next() {
-                                let x = ptr.x();
-                                let y = ptr.y();
                                 let mut st = STATE.lock().unwrap();
+                                let (rw, rh) = st.raw_win_dims;
+                                let (bw, bh) = st.screen_dims;
+                                let x = if rw > 1.0 { ptr.x() * (bw / rw) } else { ptr.x() };
+                                let y = if rh > 1.0 { ptr.y() * (bh / rh) } else { ptr.y() };
+                                if st.ui.voice_hud.is_some() && y <= (64.0 * (bw / 960.0).min(bh / 540.0)) {
+                                    st.ui.voice_hud = None;
+                                    st.pending_calls.push(PendingJavaCall::StopVoiceAssistant);
+                                    st.needs_redraw = true;
+                                    return InputStatus::Handled;
+                                }
                                 if st.ui.setup.open {
                                     let (sw, sh) = st.screen_dims;
                                     let unit = (sw / 960.0).min(sh / 540.0);

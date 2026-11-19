@@ -69,6 +69,11 @@ public class MainActivity extends NativeActivity {
     public static volatile MainActivity activeInstance;
     public static volatile String lastLaunchedPackage = "";
     public static volatile boolean isKeyCaptureActive = false;
+    public static volatile boolean isInForeground = false;
+    public static volatile int cachedVoiceKc = -1;
+    public static volatile int cachedVoiceSc = -1;
+    public static volatile int cachedCcKc = -1;
+    public static volatile int cachedCcSc = -1;
 
     public static native void nativeOnHomePressed();
     public static native void nativeOnRemoteKey(int keyCode, int scanCode);
@@ -126,9 +131,16 @@ public class MainActivity extends NativeActivity {
     protected void onResume() {
         super.onResume();
         activeInstance = this;
+        isInForeground = true;
         resetTvFocusLock();
         refreshInstalledApps();
         refreshSystemSnapshot();
+    }
+
+    @Override
+    protected void onPause() {
+        isInForeground = false;
+        super.onPause();
     }
 
     @Override
@@ -195,16 +207,15 @@ public class MainActivity extends NativeActivity {
                 return true;
             }
 
-            SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
-            int customVoiceKc = sp.getInt("voice_key_code", -1);
-            int customVoiceSc = sp.getInt("voice_scan_code", -1);
-            boolean matchesCustomVoice = (customVoiceKc > 0 && kc == customVoiceKc)
-                    || (customVoiceSc > 0 && sc == customVoiceSc);
+            if (kc == KeyEvent.KEYCODE_BACK && VoiceAssistant.isActive()) {
+                VoiceAssistant.stopListening();
+                return true;
+            }
 
-            int customCcKc = sp.getInt("cc_key_code", -1);
-            int customCcSc = sp.getInt("cc_scan_code", -1);
-            boolean matchesCustomCc = (customCcKc > 0 && kc == customCcKc)
-                    || (customCcSc > 0 && sc == customCcSc);
+            boolean matchesCustomVoice = (cachedVoiceKc > 0 && kc == cachedVoiceKc)
+                    || (cachedVoiceSc > 0 && sc == cachedVoiceSc);
+            boolean matchesCustomCc = (cachedCcKc > 0 && kc == cachedCcKc)
+                    || (cachedCcSc > 0 && sc == cachedCcSc);
 
             if (!isKeyCaptureActive && matchesCustomCc) {
                 try {
@@ -854,14 +865,16 @@ public class MainActivity extends NativeActivity {
 
     private void loadSavedKeybinds() {
         SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
-        int vkc = sp.getInt("voice_key_code", -1);
-        int vsc = sp.getInt("voice_scan_code", -1);
-        int cckc = sp.getInt("cc_key_code", -1);
-        int ccsc = sp.getInt("cc_scan_code", -1);
-        nativeLoadKeybinds(vkc, vsc, cckc, ccsc);
+        cachedVoiceKc = sp.getInt("voice_key_code", -1);
+        cachedVoiceSc = sp.getInt("voice_scan_code", -1);
+        cachedCcKc = sp.getInt("cc_key_code", -1);
+        cachedCcSc = sp.getInt("cc_scan_code", -1);
+        nativeLoadKeybinds(cachedVoiceKc, cachedVoiceSc, cachedCcKc, cachedCcSc);
     }
 
     public void saveVoiceKeybindFromRust(int keyCode, int scanCode) {
+        cachedVoiceKc = keyCode;
+        cachedVoiceSc = scanCode;
         getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
                 .edit()
                 .putInt("voice_key_code", keyCode)
@@ -870,6 +883,8 @@ public class MainActivity extends NativeActivity {
     }
 
     public void saveCcKeybindFromRust(int keyCode, int scanCode) {
+        cachedCcKc = keyCode;
+        cachedCcSc = scanCode;
         getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
                 .edit()
                 .putInt("cc_key_code", keyCode)
@@ -878,6 +893,10 @@ public class MainActivity extends NativeActivity {
     }
 
     public void resetKeybindsFromRust() {
+        cachedVoiceKc = -1;
+        cachedVoiceSc = -1;
+        cachedCcKc = -1;
+        cachedCcSc = -1;
         getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
                 .edit()
                 .remove("voice_key_code")
@@ -917,6 +936,10 @@ public class MainActivity extends NativeActivity {
 
     public void startVoiceAssistantFromRust() {
         VoiceAssistant.startListening(this);
+    }
+
+    public void stopVoiceAssistantFromRust() {
+        VoiceAssistant.stopListening();
     }
 
     public void submitSpokenOrTypedCommandFromRust(String text) {
