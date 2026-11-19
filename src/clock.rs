@@ -1,13 +1,17 @@
-//! Crisp 1:1 pixel-aligned Glass Clock & Multi-Script Header Text rasterizer using `fontdue`.
+//! Crisp 1:1 pixel-aligned Glass Clock & Cached Multi-Script Text rasterizer using `fontdue`.
 
-use fontdue::{Font, FontSettings};
+use fontdue::{Font, FontSettings, Metrics};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tiny_skia::{Color, Pixmap, PixmapPaint, PremultipliedColorU8, Transform};
 
 static SCRIPT_FONTS: Lazy<Mutex<HashMap<&'static str, Option<Font>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+type GlyphKey = (usize, char, u16);
+static GLYPH_CACHE: Lazy<Mutex<HashMap<GlyphKey, Arc<(Metrics, Vec<u8>)>>>> =
+    Lazy::new(|| Mutex::new(HashMap::with_capacity(512)));
 
 fn script_bucket(ch: char) -> Option<(&'static str, &'static [&'static str])> {
     let code = ch as u32;
@@ -91,7 +95,7 @@ fn script_bucket(ch: char) -> Option<(&'static str, &'static [&'static str])> {
     }
 }
 
-fn rasterize_char_with_fallback(primary: &Font, ch: char, px: f32) -> (fontdue::Metrics, Vec<u8>) {
+fn rasterize_uncached(primary: &Font, ch: char, px: f32) -> (Metrics, Vec<u8>) {
     if let Some((key, paths)) = script_bucket(ch) {
         if let Ok(mut cache) = SCRIPT_FONTS.lock() {
             let entry = cache.entry(key).or_insert_with(|| {
@@ -215,7 +219,7 @@ impl CrispClock {
         let mut max_descent: i32 = 0;
 
         for ch in text.chars() {
-            let (metrics, bitmap) = rasterize_char_with_fallback(font, ch, px);
+            let (metrics, bitmap) = rasterize_uncached(font, ch, px);
             let ascent = metrics.height as i32 + metrics.ymin;
             let descent = (-metrics.ymin).max(0);
             if ascent > max_ascent {
@@ -298,38 +302,78 @@ pub fn draw_crisp_label(
     let w = pm.width() as i32;
     let h = pm.height() as i32;
     let rgba = color.to_color_u8();
+    if rgba.alpha() == 0 {
+        return;
+    }
+    let px_key = (px.round().clamp(6.0, 400.0)) as u16;
+    let px_f = px_key as f32;
+    let font_id = font as *const Font as usize;
     let mut pen_x = x;
 
+    let Ok(mut cache) = GLYPH_CACHE.lock() else {
+        return;
+    };
+    if cache.len() > 2400 {
+        cache.clear();
+    }
+
+    let pixels = pm.pixels_mut();
+    let fg_r = rgba.red() as u32;
+    let fg_g = rgba.green() as u32;
+    let fg_b = rgba.blue() as u32;
+    let fg_a = rgba.alpha() as u32;
+
     for ch in text.chars() {
-        let (metrics, bitmap) = rasterize_char_with_fallback(font, ch, px);
+        let entry = cache
+            .entry((font_id, ch, px_key))
+            .or_insert_with(|| Arc::new(rasterize_uncached(font, ch, px_f)));
+        let (ref metrics, ref bitmap) = **entry;
+
         let gx = pen_x + metrics.xmin;
         let gy = baseline_y - (metrics.height as i32 + metrics.ymin);
-        for row in 0..metrics.height {
-            for col in 0..metrics.width {
-                let a = bitmap[row * metrics.width + col];
+        let mw = metrics.width;
+        let mh = metrics.height;
+
+        for row in 0..mh {
+            let px_y = gy + row as i32;
+            if px_y < 0 || px_y >= h {
+                continue;
+            }
+            let row_off = row * mw;
+            let dst_row = (px_y * w) as usize;
+            let sh_row = if with_shadow && px_y + 1 < h {
+                Some(((px_y + 1) * w) as usize)
+            } else {
+                None
+            };
+
+            for col in 0..mw {
+                let a = bitmap[row_off + col] as u32;
                 if a == 0 {
                     continue;
                 }
                 let px_x = gx + col as i32;
-                let px_y = gy + row as i32;
-                if px_x >= 0 && px_y >= 0 && px_x < w && px_y < h {
-                    if with_shadow {
-                        let sx = px_x + 1;
-                        let sy = px_y + 1;
-                        if sx < w && sy < h {
-                            let s_idx = (sy * w + sx) as usize;
-                            let sa = ((a as u32 * 105) / 255) as u8;
-                            let sh = Color::from_rgba8(0, 0, 0, sa).premultiply().to_color_u8();
-                            pm.pixels_mut()[s_idx] = blend_over(pm.pixels()[s_idx], sh);
-                        }
-                    }
-                    let out_a = ((a as u32 * rgba.alpha() as u32) / 255) as u8;
-                    let src = Color::from_rgba8(rgba.red(), rgba.green(), rgba.blue(), out_a)
-                        .premultiply()
-                        .to_color_u8();
-                    let idx = (px_y * w + px_x) as usize;
-                    pm.pixels_mut()[idx] = blend_over(pm.pixels()[idx], src);
+                if px_x < 0 || px_x >= w {
+                    continue;
                 }
+
+                if let Some(sr) = sh_row {
+                    let sx = px_x + 1;
+                    if sx < w {
+                        let s_idx = sr + sx as usize;
+                        let sa = ((a * fg_a * 105) / (255 * 255)) as u8;
+                        let sh = PremultipliedColorU8::from_rgba(0, 0, 0, sa).unwrap_or(PremultipliedColorU8::TRANSPARENT);
+                        pixels[s_idx] = blend_over(pixels[s_idx], sh);
+                    }
+                }
+
+                let out_a = (a * fg_a) / 255;
+                let pr = ((fg_r * out_a + 127) / 255) as u8;
+                let pg = ((fg_g * out_a + 127) / 255) as u8;
+                let pb = ((fg_b * out_a + 127) / 255) as u8;
+                let src = PremultipliedColorU8::from_rgba(pr, pg, pb, out_a as u8).unwrap_or(PremultipliedColorU8::TRANSPARENT);
+                let idx = dst_row + px_x as usize;
+                pixels[idx] = blend_over(pixels[idx], src);
             }
         }
         pen_x += metrics.advance_width.round() as i32;
@@ -340,9 +384,25 @@ pub fn measure_label_width(font: Option<&Font>, text: &str, px: f32) -> f32 {
     let Some(font) = font else {
         return text.len() as f32 * px * 0.5;
     };
-    text.chars()
-        .map(|ch| rasterize_char_with_fallback(font, ch, px).0.advance_width)
-        .sum()
+    let px_f = px.round().clamp(6.0, 400.0);
+    let mut sum = 0.0f32;
+    for ch in text.chars() {
+        if script_bucket(ch).is_none() && font.lookup_glyph_index(ch) != 0 {
+            sum += font.metrics(ch, px_f).advance_width;
+        } else {
+            let px_key = px_f as u16;
+            let font_id = font as *const Font as usize;
+            if let Ok(mut cache) = GLYPH_CACHE.lock() {
+                let entry = cache
+                    .entry((font_id, ch, px_key))
+                    .or_insert_with(|| Arc::new(rasterize_uncached(font, ch, px_f)));
+                sum += entry.0.advance_width;
+            } else {
+                sum += font.metrics(ch, px_f).advance_width;
+            }
+        }
+    }
+    sum
 }
 
 #[inline]
