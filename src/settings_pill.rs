@@ -5,7 +5,7 @@ use crate::clock::{draw_crisp_label, measure_label_width};
 use crate::glyphs::{draw_glyph, Glyph};
 use fontdue::{Font, FontSettings};
 use tiny_skia::{
-    Color, FillRule, FilterQuality, Paint, Path, PathBuilder, Pattern, Pixmap, Rect, SpreadMode,
+    Color, FillRule, Paint, Path, PathBuilder, Pixmap, Rect,
     Stroke, Transform,
 };
 

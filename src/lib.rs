@@ -725,8 +725,7 @@ pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeSetBackgroundApps
         let pkg = env
             .get_object_array_element(&packages, i as i32)
             .ok()
-            .and_then(|o| env.get_string(&JString::from(o)).ok())
-            .map(|s| -> String { s.into() })
+            .and_then(|o| { let js = JString::from(o); env.get_string(&js).ok().map(|s| -> String { s.into() }) })
             .unwrap_or_default();
         if !pkg.is_empty() {
             list.push((pkg, run_buf.get(i).copied().unwrap_or(0) != 0));
