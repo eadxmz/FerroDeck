@@ -2167,7 +2167,6 @@ impl LauncherUi {
         let sw = pm.width() as f32;
         let sh = pm.height() as f32;
         let unit = (sw / DESIGN_W).min(sh / DESIGN_H);
-        let scene = self.current_scene();
 
         let full_date_line = if self.weather_enabled && !self.weather_temp.is_empty() {
             if self.weather_desc.is_empty() {
