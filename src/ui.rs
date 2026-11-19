@@ -1581,7 +1581,7 @@ impl LauncherUi {
         if self.search_ui.open {
             let margin = (48.0 * unit).round();
             let box_w = sw - margin * 2.0;
-            let key_y = (94.0 * unit + slide_y).round();
+            let key_y = (94.0 * unit).round();
             let key_h = (30.0 * unit).round();
             let key_gap = (4.0 * unit).round();
             let total_keys = SEARCH_KEYS.len();
@@ -1611,7 +1611,7 @@ impl LauncherUi {
                 }
             }
             let results = self.search_matching_apps();
-            let res_top = (146.0 * unit + slide_y).round();
+            let res_top = (146.0 * unit).round();
             let row_h = (38.0 * unit).round();
             let row_gap = (8.0 * unit).round();
             if px >= margin && px <= margin + box_w {
@@ -3254,7 +3254,7 @@ impl LauncherUi {
         );
 
         // One-row tvOS keyboard
-        let key_y = (94.0 * unit).round();
+        let key_y = (94.0 * unit + slide_y).round();
         let key_h = (30.0 * unit).round();
         let key_gap = (4.0 * unit).round();
         let total_keys = SEARCH_KEYS.len();
@@ -3309,7 +3309,7 @@ impl LauncherUi {
 
         // Results list (stadium pills)
         let results = self.search_matching_apps();
-        let res_top = (146.0 * unit).round();
+        let res_top = (146.0 * unit + slide_y).round();
         let row_h = (38.0 * unit).round();
         let row_gap = (8.0 * unit).round();
         for (i, (_pkg, label, is_action)) in results.iter().take(7).enumerate() {
