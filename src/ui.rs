@@ -597,7 +597,7 @@ impl LauncherUi {
     pub fn set_apps(&mut self, mut apps: Vec<AppTile>) {
         apps.push(AppTile {
             package_name: SETTINGS_TILE_PKG.into(),
-            label: "Home settings".into(),
+            label: "Settings".into(),
             icon: self.settings_icon_pm.clone(),
             accent: [48, 54, 68],
             is_builtin: true,
@@ -1706,8 +1706,7 @@ impl LauncherUi {
                     self.selected_index = target_idx;
                     if let Some(tile) = self.apps.get(target_idx) {
                         if tile.package_name == SETTINGS_TILE_PKG {
-                            self.settings.open_at(SettingsCategory::Appearance);
-                            return (None, SideEffect::RefreshSystemSnapshot);
+                            return (None, SideEffect::OpenAndroidSettings);
                         }
                         return (Some(tile.package_name.clone()), SideEffect::None);
                     }

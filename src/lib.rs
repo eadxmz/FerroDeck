@@ -1142,8 +1142,7 @@ fn activate_ok_press(st: &mut SharedState, row_count: usize) {
             FocusZone::Dock => {
                 if let Some(app_tile) = st.ui.apps.get(st.ui.selected_index) {
                     if app_tile.package_name == SETTINGS_TILE_PKG {
-                        st.ui.settings.open_at(SettingsCategory::Appearance);
-                        st.pending_calls.push(PendingJavaCall::Effect(SideEffect::RefreshSystemSnapshot));
+                        st.pending_calls.push(PendingJavaCall::Effect(SideEffect::OpenAndroidSettings));
                     } else {
                         st.pending_calls.push(PendingJavaCall::LaunchPkg(app_tile.package_name.clone()));
                     }

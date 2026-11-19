@@ -2,7 +2,18 @@ package com.eadxmz.ferrodeck;
 
 import android.app.ActivityManager;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.NativeActivity;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.app.NotificationManager;
 import android.bluetooth.BluetoothAdapter;
 import android.content.Context;
@@ -445,74 +456,241 @@ public class MainActivity extends NativeActivity {
                 .apply();
     }
 
-    public void promptProfileNameFromRust(final String currentName) {
+    private interface InputDialogCallback {
+        void onSubmit(String value);
+    }
+
+    private int dpPx(float dp) {
+        return Math.round(TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, dp, getResources().getDisplayMetrics()));
+    }
+
+    private TextView buildGlassPillButton(String label, final boolean primary, final Runnable onClick) {
+        final TextView btn = new TextView(this);
+        btn.setText(label);
+        btn.setSingleLine(true);
+        btn.setGravity(Gravity.CENTER);
+        btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        btn.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        btn.setPadding(dpPx(20), dpPx(10), dpPx(20), dpPx(10));
+        btn.setFocusable(true);
+        btn.setFocusableInTouchMode(false);
+        btn.setClickable(true);
+
+        final int radius = dpPx(999);
+        final Runnable applyStyle = () -> {
+            boolean focused = btn.isFocused();
+            GradientDrawable bg = new GradientDrawable();
+            bg.setCornerRadius(radius);
+            if (focused) {
+                bg.setColor(0xFFF5F7FA);
+                bg.setStroke(dpPx(1.5f), 0xFFFFFFFF);
+                btn.setTextColor(0xFF10121A);
+            } else if (primary) {
+                bg.setColor(0x38FFFFFF);
+                bg.setStroke(dpPx(1f), 0x77FFFFFF);
+                btn.setTextColor(0xFFF6F8FC);
+            } else {
+                bg.setColor(0x1AFFFFFF);
+                bg.setStroke(dpPx(1f), 0x38FFFFFF);
+                btn.setTextColor(0xFFD2DAE8);
+            }
+            btn.setBackground(bg);
+        };
+        applyStyle.run();
+        btn.setOnFocusChangeListener((v, hasFocus) -> applyStyle.run());
+        btn.setOnClickListener(v -> {
+            if (onClick != null) onClick.run();
+        });
+        return btn;
+    }
+
+    private void showGlassInputDialog(
+            final String title,
+            final String subtitle,
+            final String initialValue,
+            final String hint,
+            final String positiveLabel,
+            final String neutralLabel,
+            final Runnable onNeutral,
+            final InputDialogCallback onSave) {
         runOnUiThread(() -> {
             try {
+                final Dialog dlg = new Dialog(this);
+                dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                dlg.setCancelable(true);
+
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dpPx(26), dpPx(24), dpPx(26), dpPx(22));
+                GradientDrawable cardBg = new GradientDrawable();
+                cardBg.setColor(0xF0151926);
+                cardBg.setCornerRadius(dpPx(24));
+                cardBg.setStroke(dpPx(1.2f), 0x52FFFFFF);
+                card.setBackground(cardBg);
+
+                TextView titleView = new TextView(this);
+                titleView.setText(title);
+                titleView.setTextColor(0xFFFFFFFF);
+                titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f);
+                titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                card.addView(titleView);
+
+                if (subtitle != null && !subtitle.isEmpty()) {
+                    TextView subView = new TextView(this);
+                    subView.setText(subtitle);
+                    subView.setTextColor(0xFFB4C0D4);
+                    subView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+                    LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    slp.topMargin = dpPx(5);
+                    card.addView(subView, slp);
+                }
+
                 final EditText input = new EditText(this);
                 input.setSingleLine(true);
                 input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
                 input.setImeOptions(EditorInfo.IME_ACTION_DONE);
-                input.setText(currentName);
-                input.setSelection(currentName != null ? currentName.length() : 0);
+                input.setTextColor(0xFFFFFFFF);
+                input.setHintTextColor(0x88B4C0D4);
+                input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f);
+                input.setPadding(dpPx(16), dpPx(12), dpPx(16), dpPx(12));
+                if (hint != null) input.setHint(hint);
+                if (initialValue != null) {
+                    input.setText(initialValue);
+                    input.setSelection(initialValue.length());
+                }
 
-                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Profile Name")
-                        .setMessage("Enter your name for the Home greeting:")
-                        .setView(input)
-                        .setPositiveButton("Save", (d, w) -> {
-                            String next = input.getText().toString().trim();
-                            if (!next.isEmpty()) {
-                                SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
-                                sp.edit().putString("profile_name", next).apply();
-                                nativeApplyLoadedPrefs(
-                                        sp.getBoolean("setup_done", false),
-                                        sp.getInt("setup_step", 1),
-                                        next,
-                                        sp.getString("lang_code", "en"),
-                                        sp.getBoolean("classic_look", false),
-                                        sp.getBoolean("weather_enabled", true),
-                                        sp.getBoolean("weather_auto", true),
-                                        sp.getString("weather_city", ""));
-                            }
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show();
+                final Runnable styleInput = () -> {
+                    GradientDrawable ibg = new GradientDrawable();
+                    ibg.setCornerRadius(dpPx(14));
+                    if (input.isFocused()) {
+                        ibg.setColor(0x2BFFFFFF);
+                        ibg.setStroke(dpPx(1.6f), 0xE6FFFFFF);
+                    } else {
+                        ibg.setColor(0x1CFFFFFF);
+                        ibg.setStroke(dpPx(1f), 0x44FFFFFF);
+                    }
+                    input.setBackground(ibg);
+                };
+                styleInput.run();
+                input.setOnFocusChangeListener((v, hasFocus) -> styleInput.run());
+
+                LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ilp.topMargin = dpPx(18);
+                ilp.bottomMargin = dpPx(20);
+                card.addView(input, ilp);
+
+                LinearLayout btnRow = new LinearLayout(this);
+                btnRow.setOrientation(LinearLayout.HORIZONTAL);
+                btnRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+
+                if (neutralLabel != null && onNeutral != null) {
+                    TextView neutralBtn = buildGlassPillButton(neutralLabel, false, () -> {
+                        dlg.dismiss();
+                        onNeutral.run();
+                    });
+                    LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    nlp.rightMargin = dpPx(10);
+                    btnRow.addView(neutralBtn, nlp);
+                }
+
+                TextView cancelBtn = buildGlassPillButton("Cancel", false, dlg::dismiss);
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                clp.rightMargin = dpPx(10);
+                btnRow.addView(cancelBtn, clp);
+
+                final Runnable submitAction = () -> {
+                    String val = input.getText().toString().trim();
+                    dlg.dismiss();
+                    if (onSave != null) onSave.onSubmit(val);
+                };
+                TextView saveBtn = buildGlassPillButton(positiveLabel, true, submitAction);
+                btnRow.addView(saveBtn, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                input.setOnEditorActionListener((v, actionId, event) -> {
+                    if (actionId == EditorInfo.IME_ACTION_DONE
+                            || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                                && event.getAction() == KeyEvent.ACTION_DOWN)) {
+                        submitAction.run();
+                        return true;
+                    }
+                    return false;
+                });
+
+                card.addView(btnRow, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                dlg.setContentView(card);
+                Window win = dlg.getWindow();
+                if (win != null) {
+                    win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                    WindowManager.LayoutParams wlp = win.getAttributes();
+                    wlp.width = dpPx(430);
+                    wlp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    wlp.gravity = Gravity.CENTER;
+                    wlp.dimAmount = 0.62f;
+                    win.setAttributes(wlp);
+                    win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                    win.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+                }
+                dlg.show();
+                input.requestFocus();
             } catch (Throwable ignored) { }
         });
     }
 
-    public void promptWeatherCityFromRust(final String currentCity) {
-        runOnUiThread(() -> {
-            try {
-                final EditText input = new EditText(this);
-                input.setSingleLine(true);
-                input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-                input.setImeOptions(EditorInfo.IME_ACTION_DONE);
-                input.setHint("e.g. Srinagar, Mumbai, New Delhi");
-                input.setText(currentCity);
-                input.setSelection(currentCity != null ? currentCity.length() : 0);
+    public void promptProfileNameFromRust(final String currentName) {
+        showGlassInputDialog(
+                "Profile Name",
+                "Enter the name displayed in your Home greeting.",
+                currentName,
+                "e.g. Home, Sadim, Living Room",
+                "Save",
+                null,
+                null,
+                next -> {
+                    if (!next.isEmpty()) {
+                        SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
+                        sp.edit().putString("profile_name", next).apply();
+                        nativeApplyLoadedPrefs(
+                                sp.getBoolean("setup_done", false),
+                                sp.getInt("setup_step", 1),
+                                next,
+                                sp.getString("lang_code", "en"),
+                                sp.getBoolean("classic_look", false),
+                                sp.getBoolean("weather_enabled", true),
+                                sp.getBoolean("weather_auto", true),
+                                sp.getString("weather_city", ""));
+                    }
+                });
+    }
 
-                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Choose Weather City")
-                        .setMessage("Enter a city name for live Home weather:")
-                        .setView(input)
-                        .setPositiveButton("Save & Fetch", (d, w) -> {
-                            String city = input.getText().toString().trim();
-                            if (!city.isEmpty()) {
-                                SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
-                                sp.edit()
-                                        .putBoolean("weather_enabled", true)
-                                        .putBoolean("weather_auto", false)
-                                        .putString("weather_city", city)
-                                        .apply();
-                                nativeUpdateWeather(city, "Loading...", "");
-                                fetchWeatherFromRust(false, city);
-                            }
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show();
-            } catch (Throwable ignored) { }
-        });
+    public void promptWeatherCityFromRust(final String currentCity) {
+        showGlassInputDialog(
+                "Choose Weather City",
+                "Enter any city name to fetch live Home weather.",
+                currentCity,
+                "e.g. Srinagar, Mumbai, New Delhi",
+                "Save & Fetch",
+                null,
+                null,
+                city -> {
+                    if (!city.isEmpty()) {
+                        SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
+                        sp.edit()
+                                .putBoolean("weather_enabled", true)
+                                .putBoolean("weather_auto", false)
+                                .putString("weather_city", city)
+                                .apply();
+                        nativeUpdateWeather(city, "Loading...", "");
+                        fetchWeatherFromRust(false, city);
+                    }
+                });
     }
 
     public void fetchWeatherFromRust(final boolean autoDetect, final String manualCity) {
@@ -626,38 +804,27 @@ public class MainActivity extends NativeActivity {
 
     public void promptRenameAppFromRust(final String pkg, final String currentLabel) {
         if (pkg == null || pkg.isEmpty()) return;
-        runOnUiThread(() -> {
-            try {
-                final EditText input = new EditText(this);
-                input.setSingleLine(true);
-                input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-                input.setImeOptions(EditorInfo.IME_ACTION_DONE);
-                input.setText(currentLabel);
-                input.setSelection(currentLabel != null ? currentLabel.length() : 0);
-
-                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Rename App")
-                        .setMessage("Voice Assistant will also recognize this new name:")
-                        .setView(input)
-                        .setPositiveButton("Save", (d, w) -> {
-                            String next = input.getText().toString().trim();
-                            SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
-                            if (next.isEmpty()) {
-                                sp.edit().remove("rename_" + pkg).apply();
-                            } else {
-                                sp.edit().putString("rename_" + pkg, next).apply();
-                            }
-                            refreshInstalledApps();
-                        })
-                        .setNeutralButton("Reset Default", (d, w) -> {
-                            getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
-                                    .edit().remove("rename_" + pkg).apply();
-                            refreshInstalledApps();
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show();
-            } catch (Throwable ignored) { }
-        });
+        showGlassInputDialog(
+                "Rename App",
+                "Voice Assistant will also recognize this custom name.",
+                currentLabel,
+                "e.g. YouTube",
+                "Save",
+                "Reset Default",
+                () -> {
+                    getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE)
+                            .edit().remove("rename_" + pkg).apply();
+                    refreshInstalledApps();
+                },
+                next -> {
+                    SharedPreferences sp = getSharedPreferences("ferrodeck_apps", Context.MODE_PRIVATE);
+                    if (next.isEmpty()) {
+                        sp.edit().remove("rename_" + pkg).apply();
+                    } else {
+                        sp.edit().putString("rename_" + pkg, next).apply();
+                    }
+                    refreshInstalledApps();
+                });
     }
 
     public void setAppHiddenFromRust(String pkg, boolean hidden) {
