@@ -10,6 +10,7 @@
 use crate::clock::{draw_crisp_label, measure_label_width, CrispClock};
 use crate::glyphs::{draw_glyph, Glyph};
 use crate::settings_pill::{rounded_rect_path, HomeSettingsScreen, SettingRowItem, SettingsCategory};
+use crate::setup_wizard::SetupWizard;
 pub struct LangEntry {
     pub code: &'static str,
     pub is_native_india: bool,
@@ -19,82 +20,82 @@ pub struct LangEntry {
 }
 
 pub const ALL_LANGUAGES: &[LangEntry] = &[
-    // NATIVE (INDIA) — English kept as native default alongside Indian languages
+    // NATIVE (INDIA) — English kept as Native default alongside Indian languages
     LangEntry {
         code: "en",
         is_native_india: true,
-        title: "English",
-        subtitle: "Use FerroDeck in English (Native)",
+        title: "English (Native)",
+        subtitle: "Use FerroDeck in English · India Native default",
         action_id: "set_lang:en",
     },
     LangEntry {
         code: "hi",
         is_native_india: true,
-        title: "हिन्दी (Hindi)",
-        subtitle: "FerroDeck का उपयोग हिन्दी में करें",
+        title: "Hindi",
+        subtitle: "Use FerroDeck in Hindi (India)",
         action_id: "set_lang:hi",
     },
     LangEntry {
         code: "ta",
         is_native_india: true,
-        title: "தமிழ் (Tamil)",
-        subtitle: "FerroDeck-ஐ தமிழில் பயன்படுத்தவும்",
+        title: "Tamil",
+        subtitle: "Use FerroDeck in Tamil (India)",
         action_id: "set_lang:ta",
     },
     LangEntry {
         code: "te",
         is_native_india: true,
-        title: "తెలుగు (Telugu)",
-        subtitle: "FerroDeck ను తెలుగులో ఉపయోగించండి",
+        title: "Telugu",
+        subtitle: "Use FerroDeck in Telugu (India)",
         action_id: "set_lang:te",
     },
     LangEntry {
         code: "bn",
         is_native_india: true,
-        title: "বাংলা (Bengali)",
-        subtitle: "বাংলায় FerroDeck ব্যবহার করুন",
+        title: "Bengali",
+        subtitle: "Use FerroDeck in Bengali (India)",
         action_id: "set_lang:bn",
     },
     LangEntry {
         code: "mr",
         is_native_india: true,
-        title: "मराठी (Marathi)",
-        subtitle: "FerroDeck मराठीत वापरा",
+        title: "Marathi",
+        subtitle: "Use FerroDeck in Marathi (India)",
         action_id: "set_lang:mr",
     },
     LangEntry {
         code: "kn",
         is_native_india: true,
-        title: "ಕನ್ನಡ (Kannada)",
-        subtitle: "FerroDeck ಅನ್ನು ಕನ್ನಡದಲ್ಲಿ ಬಳಸಿ",
+        title: "Kannada",
+        subtitle: "Use FerroDeck in Kannada (India)",
         action_id: "set_lang:kn",
     },
     LangEntry {
         code: "ml",
         is_native_india: true,
-        title: "മലയാളം (Malayalam)",
-        subtitle: "മലയാളത്തിൽ FerroDeck ഉപയോഗിക്കുക",
+        title: "Malayalam",
+        subtitle: "Use FerroDeck in Malayalam (India)",
         action_id: "set_lang:ml",
     },
     LangEntry {
         code: "gu",
         is_native_india: true,
-        title: "ગુજરાતી (Gujarati)",
-        subtitle: "ગુજરાતીમાં FerroDeck નો ઉપયોગ કરો",
+        title: "Gujarati",
+        subtitle: "Use FerroDeck in Gujarati (India)",
         action_id: "set_lang:gu",
     },
     LangEntry {
         code: "pa",
         is_native_india: true,
-        title: "ਪੰਜਾਬੀ (Punjabi)",
-        subtitle: "ਪੰਜਾਬੀ ਵਿੱਚ FerroDeck ਵਰਤੋ",
+        title: "Punjabi",
+        subtitle: "Use FerroDeck in Punjabi (India)",
         action_id: "set_lang:pa",
     },
     LangEntry {
         code: "ur",
         is_native_india: true,
-        title: "اردو (Urdu)",
-        subtitle: "FerroDeck کو اردو میں استعمال کریں",
+        title: "Urdu",
+        subtitle: "Use FerroDeck in Urdu (India)",
         action_id: "set_lang:ur",
     },
     // GLOBAL
@@ -141,13 +142,6 @@ pub const ALL_LANGUAGES: &[LangEntry] = &[
         action_id: "set_lang:pt",
     },
     LangEntry {
-        code: "ru",
-        is_native_india: false,
-        title: "Русский",
-        subtitle: "Использовать FerroDeck на русском",
-        action_id: "set_lang:ru",
-    },
-    LangEntry {
         code: "sv",
         is_native_india: false,
         title: "Svenska",
@@ -155,46 +149,46 @@ pub const ALL_LANGUAGES: &[LangEntry] = &[
         action_id: "set_lang:sv",
     },
     LangEntry {
+        code: "ru",
+        is_native_india: false,
+        title: "Russian",
+        subtitle: "Use FerroDeck in Russian (Global)",
+        action_id: "set_lang:ru",
+    },
+    LangEntry {
         code: "ar",
         is_native_india: false,
-        title: "العربية",
-        subtitle: "استخدم FerroDeck باللغة العربية",
+        title: "Arabic",
+        subtitle: "Use FerroDeck in Arabic (Global)",
         action_id: "set_lang:ar",
     },
     LangEntry {
         code: "ja",
         is_native_india: false,
-        title: "日本語",
-        subtitle: "FerroDeck を日本語で使用する",
+        title: "Japanese",
+        subtitle: "Use FerroDeck in Japanese (Global)",
         action_id: "set_lang:ja",
     },
     LangEntry {
         code: "ko",
         is_native_india: false,
-        title: "한국어",
-        subtitle: "FerroDeck를 한국어로 사용",
+        title: "Korean",
+        subtitle: "Use FerroDeck in Korean (Global)",
         action_id: "set_lang:ko",
     },
     LangEntry {
         code: "zh",
         is_native_india: false,
-        title: "中文",
-        subtitle: "使用中文版 FerroDeck",
+        title: "Chinese",
+        subtitle: "Use FerroDeck in Chinese (Global)",
         action_id: "set_lang:zh",
     },
 ];
 
 pub fn localized_greeting(lang_code: &str, h24: u32, user_name: &str) -> String {
     let prefix = match lang_code {
-        "hi" | "mr" => {
-            if h24 < 12 {
-                "सुप्रभात"
-            } else if h24 < 17 {
-                "शुभ दोपहर"
-            } else {
-                "शुभ संध्या"
-            }
-        }
+        "hi" | "mr" | "bn" | "pa" | "gu" | "ta" | "te" | "kn" | "ml" => "Namaste",
+        "ur" => "Assalamu Alaikum",
         "tr" => {
             if h24 < 12 {
                 "Günaydın"
@@ -227,6 +221,31 @@ pub fn localized_greeting(lang_code: &str, h24: u32, user_name: &str) -> String 
                 "Guten Tag"
             } else {
                 "Guten Abend"
+            }
+        }
+        "it" => {
+            if h24 < 18 {
+                "Buongiorno"
+            } else {
+                "Buonasera"
+            }
+        }
+        "pt" => {
+            if h24 < 12 {
+                "Bom dia"
+            } else if h24 < 18 {
+                "Boa tarde"
+            } else {
+                "Boa noite"
+            }
+        }
+        "sv" => {
+            if h24 < 12 {
+                "God morgon"
+            } else if h24 < 18 {
+                "God dag"
+            } else {
+                "God kväll"
             }
         }
         _ => {
@@ -409,6 +428,10 @@ pub enum SideEffect {
     ToggleAdbPort,
     RefreshSystemSnapshot,
     SetKeepScreenOn(bool),
+    PromptProfileName,
+    PromptWeatherCity,
+    FetchWeatherNow,
+    SavePrefs,
 }
 
 #[derive(Clone, Debug)]
@@ -450,14 +473,22 @@ pub struct LauncherUi {
     pub app_menu: AppContextMenu,
     pub search_ui: SearchOverlayState,
     pub voice_hud: Option<(String, String)>,
+    pub setup: SetupWizard,
     pub settings: HomeSettingsScreen,
 
     // Launcher preferences
+    pub setup_done: bool,
+    pub lang_region_global: bool,
     pub classic_look: bool,
     pub clock_style: u8, // 0 = Giant Scene Glass Clock, 1 = Top-Right Crisp, 2 = Hidden
     pub clock_24h: bool,
     pub scene_idx: usize,
     pub user_name: String,
+    pub weather_enabled: bool,
+    pub weather_auto: bool,
+    pub weather_city: String,
+    pub weather_temp: String,
+    pub weather_desc: String,
     pub sleep_timer_mins: u32,
     pub keep_alive_enabled: bool,
     pub caffeine_enabled: bool,
@@ -528,12 +559,20 @@ impl LauncherUi {
                 result_idx: 0,
             },
             voice_hud: None,
+            setup: SetupWizard::new(bold_font, med_font, reg_font),
             settings: HomeSettingsScreen::new(bold_font, med_font, reg_font),
+            setup_done: false,
+            lang_region_global: false,
             classic_look: false,
             clock_style: 0,
             clock_24h: false,
             scene_idx: 0,
             user_name: "sadim".into(),
+            weather_enabled: true,
+            weather_auto: true,
+            weather_city: String::new(),
+            weather_temp: String::new(),
+            weather_desc: String::new(),
             sleep_timer_mins: 0,
             keep_alive_enabled: true,
             caffeine_enabled: false,
@@ -755,14 +794,38 @@ impl LauncherUi {
             SettingsCategory::Weather => vec![
                 SettingRowItem {
                     section: "WEATHER & LOCATION",
-                    title: "Location mode".into(),
-                    subtitle: Some("Used for greeting & local scene header".into()),
-                    value: "Automatic (Local TZ)".into(),
+                    title: "Show weather on Home".into(),
+                    subtitle: Some("Displays live temperature next to the Home Screen date".into()),
+                    value: if self.weather_enabled { "On".into() } else { "Off".into() },
                     checked: None,
-                    action_id: "noop",
+                    action_id: "toggle_weather_enabled",
                 },
                 SettingRowItem {
-                    section: "WEATHER & LOCATION",
+                    section: "LOCATION MODE",
+                    title: "Use My Location (Automatic)".into(),
+                    subtitle: Some(if self.weather_auto && !self.weather_city.is_empty() {
+                        format!("Detected: {} · {}", self.weather_city, self.weather_temp)
+                    } else {
+                        "Auto-detect city from network & fetch live weather".into()
+                    }),
+                    value: String::new(),
+                    checked: Some(self.weather_enabled && self.weather_auto),
+                    action_id: "weather_mode_auto",
+                },
+                SettingRowItem {
+                    section: "LOCATION MODE",
+                    title: "Choose a City Manually...".into(),
+                    subtitle: Some(if !self.weather_auto && !self.weather_city.is_empty() {
+                        format!("Manual city: {} · {}", self.weather_city, self.weather_temp)
+                    } else {
+                        "Enter any city name manually".into()
+                    }),
+                    value: "Edit ›".into(),
+                    checked: Some(self.weather_enabled && !self.weather_auto),
+                    action_id: "weather_mode_manual",
+                },
+                SettingRowItem {
+                    section: "WEATHER CARD",
                     title: "Open Weather card".into(),
                     subtitle: None,
                     value: "View ›".into(),
@@ -810,11 +873,11 @@ impl LauncherUi {
             SettingsCategory::People => vec![
                 SettingRowItem {
                     section: "PROFILE",
-                    title: "Active profile".into(),
-                    subtitle: Some("Greeting displayed above the glass clock".into()),
+                    title: "Edit profile name...".into(),
+                    subtitle: Some("Shown in the greeting above the Home clock".into()),
                     value: self.user_name.clone(),
                     checked: None,
-                    action_id: "cycle_profile_name",
+                    action_id: "edit_profile_name",
                 },
             ],
             SettingsCategory::ControlPanel => vec![
@@ -887,7 +950,15 @@ impl LauncherUi {
             ],
             SettingsCategory::QuickSettings => vec![
                 SettingRowItem {
-                    section: "HOME & SYSTEM",
+                    section: "HOME & SETUP",
+                    title: "Run first-time setup again...".into(),
+                    subtitle: Some("Configure language, profile name, weather location, appearance & keybinds".into()),
+                    value: "Start ›".into(),
+                    checked: None,
+                    action_id: "run_setup_again",
+                },
+                SettingRowItem {
+                    section: "HOME & SETUP",
                     title: "Default home screen".into(),
                     subtitle: None,
                     value: if self.sys.default_home {
@@ -899,29 +970,53 @@ impl LauncherUi {
                     action_id: "open_home_picker",
                 },
                 SettingRowItem {
-                    section: "HOME & SYSTEM",
-                    title: "Open Android TV Settings…".into(),
+                    section: "HOME & SETUP",
+                    title: "Open Android TV Settings...".into(),
                     subtitle: None,
                     value: "›".into(),
                     checked: None,
                     action_id: "open_android_settings",
                 },
             ],
-            SettingsCategory::Language => ALL_LANGUAGES
-                .iter()
-                .map(|lang| SettingRowItem {
-                    section: if lang.is_native_india {
-                        "NATIVE (INDIA)"
-                    } else {
-                        "GLOBAL"
+            SettingsCategory::Language => {
+                let mut rows = vec![
+                    SettingRowItem {
+                        section: "LANGUAGE REGION MENU",
+                        title: "Native (India)".into(),
+                        subtitle: Some("English (Native) + Indian regional languages".into()),
+                        value: if !self.lang_region_global { "Selected".into() } else { "Switch ›".into() },
+                        checked: Some(!self.lang_region_global),
+                        action_id: "lang_region_native",
                     },
-                    title: lang.title.into(),
-                    subtitle: Some(lang.subtitle.into()),
-                    value: String::new(),
-                    checked: Some(self.lang_code == lang.code),
-                    action_id: lang.action_id,
-                })
-                .collect(),
+                    SettingRowItem {
+                        section: "LANGUAGE REGION MENU",
+                        title: "Global".into(),
+                        subtitle: Some("International languages worldwide".into()),
+                        value: if self.lang_region_global { "Selected".into() } else { "Switch ›".into() },
+                        checked: Some(self.lang_region_global),
+                        action_id: "lang_region_global",
+                    },
+                ];
+                let sec = if self.lang_region_global {
+                    "GLOBAL LANGUAGES"
+                } else {
+                    "NATIVE LANGUAGES (INDIA)"
+                };
+                for lang in ALL_LANGUAGES
+                    .iter()
+                    .filter(|l| l.is_native_india != self.lang_region_global)
+                {
+                    rows.push(SettingRowItem {
+                        section: sec,
+                        title: lang.title.into(),
+                        subtitle: Some(lang.subtitle.into()),
+                        value: String::new(),
+                        checked: Some(self.lang_code == lang.code),
+                        action_id: lang.action_id,
+                    });
+                }
+                rows
+            }
             SettingsCategory::Advanced => vec![
                 SettingRowItem {
                     section: "ADB & SECURITY MODE",
@@ -1094,12 +1189,35 @@ impl LauncherUi {
                 self.recent_selected = 0;
                 (false, SideEffect::RefreshSystemSnapshot, false)
             }
-            "cycle_profile_name" => {
-                self.user_name = if self.user_name == "sadim" {
-                    "eadxmz".into()
-                } else {
-                    "sadim".into()
-                };
+            "edit_profile_name" => (false, SideEffect::PromptProfileName, false),
+            "toggle_weather_enabled" => {
+                self.weather_enabled = !self.weather_enabled;
+                (false, SideEffect::SavePrefs, false)
+            }
+            "weather_mode_auto" => {
+                self.weather_enabled = true;
+                self.weather_auto = true;
+                self.settings.status_banner = Some("Detecting your location & live weather...".into());
+                (false, SideEffect::FetchWeatherNow, false)
+            }
+            "weather_mode_manual" => {
+                self.weather_enabled = true;
+                self.weather_auto = false;
+                (false, SideEffect::PromptWeatherCity, false)
+            }
+            "run_setup_again" => {
+                self.settings.open = false;
+                self.setup.open_fresh();
+                (false, SideEffect::None, false)
+            }
+            "lang_region_native" => {
+                self.lang_region_global = false;
+                self.settings.row_idx = 0;
+                (false, SideEffect::None, false)
+            }
+            "lang_region_global" => {
+                self.lang_region_global = true;
+                self.settings.row_idx = 1;
                 (false, SideEffect::None, false)
             }
             "open_cc" => {
@@ -1128,7 +1246,7 @@ impl LauncherUi {
                     let group = if entry.is_native_india { "Native · India" } else { "Global" };
                     self.settings.status_banner = Some(format!("Language: {} ({})", entry.title, group));
                 }
-                (false, SideEffect::None, false)
+                (false, SideEffect::SavePrefs, false)
             }
             "toggle_adb_mode" => {
                 self.sys.adb_mode_secure = !self.sys.adb_mode_secure;
@@ -1688,11 +1806,20 @@ impl LauncherUi {
             true,
         );
 
-        let date_w = measure_label_width(self.font_medium.as_ref(), date_str, date_px);
+        let full_date_line = if self.weather_enabled && !self.weather_temp.is_empty() {
+            if self.weather_desc.is_empty() {
+                format!("{}  ·  {}", date_str, self.weather_temp)
+            } else {
+                format!("{}  ·  {} {}", date_str, self.weather_temp, self.weather_desc)
+            }
+        } else {
+            date_str.to_string()
+        };
+        let date_w = measure_label_width(self.font_medium.as_ref(), &full_date_line, date_px);
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
-            date_str,
+            &full_date_line,
             ((sw - date_w) * 0.5).round() as i32,
             date_y as i32,
             date_px,
@@ -1755,7 +1882,30 @@ impl LauncherUi {
             self.draw_search_overlay(pm, sw, sh, unit);
         }
 
-        // 13. Inbuilt Voice Assistant HUD pill
+        // 13. First-Time Setup Wizard (full-screen Liquid Glass onboarding)
+        if self.setup.open {
+            let setup_opts = self.setup.build_options(
+                self.lang_code,
+                &self.user_name,
+                self.weather_auto,
+                self.weather_enabled,
+                &self.weather_city,
+                self.classic_look,
+                last_key_label,
+                self.sys.default_home,
+                self.sys.a11y_enabled,
+            );
+            self.setup.draw(
+                pm,
+                self.wallpaper_pm.as_ref(),
+                self.glass_backdrop_pm.as_ref(),
+                unit,
+                &setup_opts,
+                &self.user_name,
+            );
+        }
+
+        // 14. Inbuilt Voice Assistant HUD pill
         self.draw_voice_hud_banner(pm, sw, unit);
     }
 
@@ -2232,49 +2382,70 @@ impl LauncherUi {
         let ch = (165.0 * unit).round();
         let cx = ((sw - cw) * 0.5).round();
         let cy = ((sh - ch) * 0.44).round();
-        if let Some(card) = rounded_rect_path(cx, cy, cw, ch, 24.0 * unit) {
+        if let Some(card) = rounded_rect_path(cx, cy, cw, ch, 22.0 * unit) {
+            if let Some(ref glass) = self.glass_backdrop_pm {
+                let sx = sw / glass.width() as f32;
+                let sy = sh / glass.height() as f32;
+                let mut gp = Paint::default();
+                gp.anti_alias = true;
+                gp.shader = Pattern::new(
+                    glass.as_ref(),
+                    SpreadMode::Pad,
+                    FilterQuality::Bilinear,
+                    0.95,
+                    Transform::from_scale(sx, sy),
+                );
+                pm.fill_path(&card, &gp, FillRule::Winding, Transform::identity(), None);
+            }
             let mut bg = Paint::default();
             bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(20, 25, 38, 236));
+            bg.set_color(Color::from_rgba8(20, 24, 36, 155));
             pm.fill_path(&card, &bg, FillRule::Winding, Transform::identity(), None);
 
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(255, 255, 255, 85));
+            rim.set_color(Color::from_rgba8(255, 255, 255, 105));
             let mut st = Stroke::default();
             st.width = (1.2 * unit).max(1.0);
             pm.stroke_path(&card, &rim, &st, Transform::identity(), None);
         }
 
         let pad = (22.0 * unit).round();
+        let city_title = if self.weather_city.is_empty() {
+            format!("{}  ·  {}", time_str, date_str)
+        } else if self.weather_temp.is_empty() {
+            self.weather_city.clone()
+        } else {
+            format!("{}  ·  {} {}", self.weather_city, self.weather_temp, self.weather_desc)
+        };
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
-            &format!("{}  ·  {}", time_str, date_str),
+            &city_title,
             (cx + pad) as i32,
-            (cy + 36.0 * unit) as i32,
+            (cy + 38.0 * unit) as i32,
             (15.0 * unit).round(),
-            Color::from_rgba8(255, 255, 255, 250),
+            Color::from_rgba8(255, 255, 255, 252),
             false,
         );
         draw_crisp_label(
             pm,
             self.font_regular.as_ref(),
-            &format!("Active Scene: {}", self.current_scene().label),
+            &format!("{}  ·  Scene: {}", date_str, self.current_scene().label),
             (cx + pad) as i32,
-            (cy + 72.0 * unit) as i32,
-            (13.5 * unit).round(),
-            Color::from_rgba8(150, 215, 255, 240),
+            (cy + 74.0 * unit) as i32,
+            (12.5 * unit).round(),
+            Color::from_rgba8(165, 218, 255, 240),
             false,
         );
         draw_crisp_label(
             pm,
             self.font_regular.as_ref(),
-            "Left/Right: Switch Scene  ·  Back/Down: Close",
+            "Left/Right: Switch Scene  ·  OK/Back: Close",
             (cx + pad) as i32,
-            (cy + 114.0 * unit) as i32,
-            (12.0 * unit).round(),
-            Color::from_rgba8(200, 210, 225, 210),
+            (cy + 118.0 * unit) as i32,
+            (11.5 * unit).round(),
+            Color::from_rgba8(215, 224, 238, 215),
             false,
         );
     }
@@ -2544,40 +2715,96 @@ impl LauncherUi {
         out
     }
 
+    pub fn app_menu_geometry(&self, sw: f32, sh: f32, unit: f32) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+        // Returns (px, py, panel_w, panel_h, pad, header_h, row_h, row_gap)
+        let items_len = self.app_menu_items().len() as f32;
+        let panel_w = (242.0 * unit).round();
+        let row_h = (28.0 * unit).round();
+        let row_gap = (5.0 * unit).round();
+        let header_h = (36.0 * unit).round();
+        let pad = (12.0 * unit).round();
+        let panel_h = pad * 2.0 + header_h + items_len * row_h + (items_len - 1.0) * row_gap;
+        let px = ((sw - panel_w) * 0.5).round();
+        // Float neatly above the dock instead of covering the entire screen
+        let py = (sh - (92.0 * unit) - panel_h).max(24.0 * unit).round();
+        (px, py, panel_w, panel_h, pad, header_h, row_h, row_gap)
+    }
+
     fn draw_app_context_menu(&self, pm: &mut Pixmap, sw: f32, sh: f32, unit: f32) {
         let Some(app) = self.apps.get(self.app_menu.app_idx) else {
             return;
         };
         let mut scrim = Paint::default();
-        scrim.set_color(Color::from_rgba8(6, 8, 14, 175));
+        scrim.set_color(Color::from_rgba8(6, 8, 14, 96));
         if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, sw, sh) {
             pm.fill_rect(r, &scrim, Transform::identity(), None);
         }
 
         let items = self.app_menu_items();
-        let panel_w = (360.0 * unit).round();
-        let row_h = (36.0 * unit).round();
-        let row_gap = (7.0 * unit).round();
-        let header_h = (56.0 * unit).round();
-        let pad = (18.0 * unit).round();
-        let panel_h = pad * 2.0 + header_h + (items.len() as f32) * (row_h + row_gap);
-        let px = ((sw - panel_w) * 0.5).round();
-        let py = ((sh - panel_h) * 0.5).round();
+        let (px, py, panel_w, panel_h, pad, header_h, row_h, row_gap) =
+            self.app_menu_geometry(sw, sh, unit);
+        let card_r = (20.0 * unit).round();
 
-        if let Some(card) = rounded_rect_path(px, py, panel_w, panel_h, 24.0 * unit) {
-            let mut bg = Paint::default();
-            bg.anti_alias = true;
-            bg.set_color(Color::from_rgba8(20, 24, 34, 244));
-            pm.fill_path(&card, &bg, FillRule::Winding, Transform::identity(), None);
+        // Soft drop shadow beneath the floating Liquid Glass sheet
+        if let Some(shadow) = rounded_rect_path(
+            px - 2.0 * unit,
+            py + 6.0 * unit,
+            panel_w + 4.0 * unit,
+            panel_h + 4.0 * unit,
+            card_r + 2.0 * unit,
+        ) {
+            let mut sp = Paint::default();
+            sp.anti_alias = true;
+            sp.set_color(Color::from_rgba8(0, 0, 0, 108));
+            pm.fill_path(&shadow, &sp, FillRule::Winding, Transform::identity(), None);
+        }
+
+        // True Liquid Glass card: live blurred glass backdrop + frosted tint + top specular sheen + crisp rim
+        if let Some(card) = rounded_rect_path(px, py, panel_w, panel_h, card_r) {
+            if let Some(ref glass) = self.glass_backdrop_pm {
+                let sx = sw / glass.width() as f32;
+                let sy = sh / glass.height() as f32;
+                let mut gp = Paint::default();
+                gp.anti_alias = true;
+                gp.shader = Pattern::new(
+                    glass.as_ref(),
+                    SpreadMode::Pad,
+                    FilterQuality::Bilinear,
+                    0.96,
+                    Transform::from_scale(sx, sy),
+                );
+                pm.fill_path(&card, &gp, FillRule::Winding, Transform::identity(), None);
+            }
+
+            let mut frost = Paint::default();
+            frost.anti_alias = true;
+            frost.set_color(Color::from_rgba8(20, 24, 36, 134));
+            pm.fill_path(&card, &frost, FillRule::Winding, Transform::identity(), None);
+
+            if let Some(sheen) = LinearGradient::new(
+                Point::from_xy(px, py),
+                Point::from_xy(px, py + panel_h * 0.45),
+                vec![
+                    GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 34)),
+                    GradientStop::new(1.0, Color::from_rgba8(255, 255, 255, 0)),
+                ],
+                SpreadMode::Pad,
+                Transform::identity(),
+            ) {
+                let mut sp = Paint::default();
+                sp.anti_alias = true;
+                sp.shader = sheen;
+                pm.fill_path(&card, &sp, FillRule::Winding, Transform::identity(), None);
+            }
 
             let mut rim = Paint::default();
             rim.anti_alias = true;
-            rim.set_color(Color::from_rgba8(255, 255, 255, 76));
+            rim.set_color(Color::from_rgba8(255, 255, 255, 118));
             pm.stroke_path(
                 &card,
                 &rim,
                 &Stroke {
-                    width: 1.2,
+                    width: (1.3 * unit).max(1.0),
                     ..Default::default()
                 },
                 Transform::identity(),
@@ -2585,24 +2812,30 @@ impl LauncherUi {
             );
         }
 
+        // Compact App Header
         draw_crisp_label(
             pm,
             self.font_medium.as_ref(),
             &app.label,
             (px + pad + 8.0 * unit) as i32,
-            (py + pad + 20.0 * unit) as i32,
-            (15.5 * unit).round(),
-            Color::from_rgba8(255, 255, 255, 250),
-            false,
+            (py + pad + 14.0 * unit) as i32,
+            (13.0 * unit).round(),
+            Color::from_rgba8(255, 255, 255, 252),
+            true,
         );
+        let subtitle = if app.is_builtin {
+            "Built-in app"
+        } else {
+            "Installed app"
+        };
         draw_crisp_label(
             pm,
             self.font_regular.as_ref(),
-            &app.package_name,
+            subtitle,
             (px + pad + 8.0 * unit) as i32,
-            (py + pad + 37.0 * unit) as i32,
-            (9.8 * unit).round(),
-            Color::from_rgba8(165, 180, 204, 200),
+            (py + pad + 27.0 * unit) as i32,
+            (9.2 * unit).round(),
+            Color::from_rgba8(190, 206, 232, 210),
             false,
         );
 
@@ -2616,28 +2849,28 @@ impl LauncherUi {
                 let mut fill = Paint::default();
                 fill.anti_alias = true;
                 fill.set_color(if focused {
-                    Color::from_rgba8(245, 247, 250, 250)
+                    Color::from_rgba8(246, 248, 252, 248)
                 } else {
-                    Color::from_rgba8(255, 255, 255, 20)
+                    Color::from_rgba8(255, 255, 255, 22)
                 });
                 pm.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
             }
             let col = if focused {
                 Color::from_rgba8(16, 18, 26, 255)
             } else if *label == "Uninstall" {
-                Color::from_rgba8(255, 118, 112, 240)
+                Color::from_rgba8(255, 118, 112, 245)
             } else if *label == "Disable" {
-                Color::from_rgba8(255, 198, 92, 245)
+                Color::from_rgba8(255, 204, 96, 248)
             } else {
-                Color::from_rgba8(242, 246, 252, 240)
+                Color::from_rgba8(245, 248, 254, 242)
             };
             draw_crisp_label(
                 pm,
                 self.font_medium.as_ref(),
                 label,
-                (px + pad + 18.0 * unit) as i32,
-                (ry + row_h * 0.65) as i32,
-                (12.2 * unit).round(),
+                (px + pad + 14.0 * unit) as i32,
+                (ry + row_h * 0.66) as i32,
+                (11.0 * unit).round(),
                 col,
                 false,
             );

@@ -111,9 +111,14 @@ fn rasterize_char_with_fallback(primary: &Font, ch: char, px: f32) -> (fontdue::
                 None
             });
             if let Some(ref fallback_font) = entry {
-                return fallback_font.rasterize(ch, px);
+                if fallback_font.lookup_glyph_index(ch) != 0 {
+                    return fallback_font.rasterize(ch, px);
+                }
             }
         }
+    }
+    if primary.lookup_glyph_index(ch) == 0 && !ch.is_whitespace() {
+        return primary.rasterize(' ', px);
     }
     primary.rasterize(ch, px)
 }

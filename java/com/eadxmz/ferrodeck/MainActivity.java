@@ -28,8 +28,17 @@ import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -56,6 +65,15 @@ public class MainActivity extends NativeActivity {
     public static native void nativeSetHiddenApps(String[] packages, String[] labels);
     public static native void nativeOpenSearchWithQuery(String query);
     public static native void nativeSetVoiceHud(boolean active, String title, String subtitle);
+    public static native void nativeApplyLoadedPrefs(
+            boolean setupDone,
+            String profileName,
+            String langCode,
+            boolean classicLook,
+            boolean weatherEnabled,
+            boolean weatherAuto,
+            String weatherCity);
+    public static native void nativeUpdateWeather(String city, String tempText, String descText);
     public static native void nativeUpdateSystemStatus(
             String wifiLabel,
             boolean btOn,
@@ -73,6 +91,7 @@ public class MainActivity extends NativeActivity {
         super.onCreate(savedInstanceState);
         activeInstance = this;
         resetTvFocusLock();
+        loadAndPushSavedPrefs();
         refreshInstalledApps();
         refreshSystemSnapshot();
         handleSpecialIntent(getIntent());
@@ -176,31 +195,48 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    private static boolean isAllowedBuiltinMediaApp(String pkg, boolean hasLeanback) {
-        if (pkg == null) return false;
+    /**
+     * Returns true ONLY for Android OS / system utilities and hardware vendor daemons that
+     * must NEVER appear in the dock (Settings, Dialer, Contacts, Gallery, Camera, DocumentsUI,
+     * SystemUI, SetupWizard, WebView Shell, Traceur, Keyboards, Launchers, SoC services).
+     * Real user-facing apps — even when pre-installed with FLAG_SYSTEM on TV boxes or emulators
+     * (e.g. YouTube, Chrome, TikTok, Instagram, WhatsApp, Messenger, 2048, Get apps, etc.) —
+     * are allowed in the dock and tagged with `isBuiltin = true` so their menu shows "Disable".
+     */
+    private static boolean isSystemUtilityPackage(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return true;
         String p = pkg.toLowerCase(java.util.Locale.ROOT);
-        // Never allow system settings, launchers, OS utilities, or hardware daemons in the dock
         if (p.equals("android")
-                || p.contains("settings")
+                || p.equals("com.android.settings")
+                || p.equals("com.android.tv.settings")
+                || p.equals("com.android.systemui")
+                || p.equals("com.android.documentsui")
+                || p.equals("com.google.android.documentsui")
+                || p.equals("com.android.dialer")
+                || p.equals("com.google.android.dialer")
+                || p.equals("com.android.contacts")
+                || p.equals("com.google.android.contacts")
+                || p.equals("com.android.messaging")
+                || p.equals("com.android.mms")
+                || p.equals("com.android.deskclock")
+                || p.equals("com.android.calculator2")
+                || p.equals("com.android.calendar")
+                || p.equals("com.android.gallery3d")
+                || p.equals("com.android.camera")
+                || p.equals("com.android.camera2")
+                || p.equals("org.chromium.webview_shell")
+                || p.equals("com.android.webview")
+                || p.equals("com.google.android.webview")
+                || p.contains(".settings")
                 || p.contains("launcher")
                 || p.contains("systemui")
-                || p.contains("setup")
+                || p.contains("setupwizard")
                 || p.contains("provider")
                 || p.contains("inputmethod")
                 || p.contains("keyboard")
-                || p.contains("permission")
+                || p.contains("permissioncontroller")
                 || p.contains("packageinstaller")
-                || p.contains("webview")
                 || p.contains("traceur")
-                || p.contains("documentsui")
-                || p.contains("dialer")
-                || p.contains("contacts")
-                || p.contains("messaging")
-                || p.contains("deskclock")
-                || p.contains("calculator")
-                || p.contains("calendar")
-                || p.contains("gallery")
-                || p.contains("camera")
                 || p.startsWith("com.android.cts")
                 || p.startsWith("com.google.android.gms")
                 || p.startsWith("com.google.android.gsf")
@@ -214,31 +250,9 @@ public class MainActivity extends NativeActivity {
                 || p.startsWith("com.rockchip.")
                 || p.startsWith("com.qualcomm.")
                 || p.startsWith("com.hisilicon.")) {
-            return false;
-        }
-        // Allow genuine built-in entertainment, store & browser apps
-        if (p.equals("com.android.vending")
-                || p.equals("com.android.chrome")
-                || p.startsWith("com.google.android.youtube")
-                || p.startsWith("com.google.android.videos")
-                || p.startsWith("com.google.android.music")
-                || p.startsWith("com.google.android.apps.tv")
-                || p.startsWith("com.netflix.")
-                || p.startsWith("com.amazon.amazonvideo")
-                || p.startsWith("com.amazon.avod")
-                || p.startsWith("com.disney.")
-                || p.equals("in.startv.hotstar")
-                || p.startsWith("com.spotify.")
-                || p.startsWith("com.apple.atve")
-                || p.startsWith("com.hbo.")
-                || p.startsWith("com.wbd.")
-                || p.startsWith("tv.twitch.")
-                || p.equals("org.videolan.vlc")
-                || p.equals("org.xbmc.kodi")) {
             return true;
         }
-        // Other vendor pre-installed apps only if they explicitly declare LEANBACK_LAUNCHER
-        return hasLeanback;
+        return false;
     }
 
     public void refreshInstalledApps() {
@@ -323,8 +337,8 @@ public class MainActivity extends NativeActivity {
                 }
             }
 
-            // 3. Exclude system apps from appearing in the dock (only allow known built-in user apps)
-            if (isSystemOrUpdated && !isAllowedBuiltinMediaApp(pkg, leanbackPkgs.contains(pkg))) {
+            // 3. Strictly exclude Android OS / system utilities & hardware daemons from the dock
+            if (isSystemUtilityPackage(pkg)) {
                 continue;
             }
 
@@ -378,6 +392,228 @@ public class MainActivity extends NativeActivity {
         nativeSetHiddenApps(
                 hiddenPkgs.toArray(new String[0]),
                 hiddenLabels.toArray(new String[0]));
+    }
+
+    // ------------------------------------------------------------------ Setup Prefs, Profile & Live Weather
+
+    private void loadAndPushSavedPrefs() {
+        SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
+        boolean setupDone = sp.getBoolean("setup_done", false);
+        String profileName = sp.getString("profile_name", "sadim");
+        String langCode = sp.getString("lang_code", "en");
+        boolean classicLook = sp.getBoolean("classic_look", false);
+        boolean weatherEnabled = sp.getBoolean("weather_enabled", true);
+        boolean weatherAuto = sp.getBoolean("weather_auto", true);
+        String weatherCity = sp.getString("weather_city", "");
+
+        nativeApplyLoadedPrefs(
+                setupDone,
+                profileName,
+                langCode,
+                classicLook,
+                weatherEnabled,
+                weatherAuto,
+                weatherCity);
+
+        if (weatherEnabled) {
+            fetchWeatherFromRust(weatherAuto, weatherCity);
+        }
+    }
+
+    public void savePrefsFromRust(
+            boolean setupDone,
+            String profileName,
+            String langCode,
+            boolean classicLook,
+            boolean weatherEnabled,
+            boolean weatherAuto,
+            String weatherCity) {
+        getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("setup_done", setupDone)
+                .putString("profile_name", profileName != null ? profileName : "sadim")
+                .putString("lang_code", langCode != null ? langCode : "en")
+                .putBoolean("classic_look", classicLook)
+                .putBoolean("weather_enabled", weatherEnabled)
+                .putBoolean("weather_auto", weatherAuto)
+                .putString("weather_city", weatherCity != null ? weatherCity : "")
+                .apply();
+    }
+
+    public void promptProfileNameFromRust(final String currentName) {
+        runOnUiThread(() -> {
+            try {
+                final EditText input = new EditText(this);
+                input.setSingleLine(true);
+                input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+                input.setImeOptions(EditorInfo.IME_ACTION_DONE);
+                input.setText(currentName);
+                input.setSelection(currentName != null ? currentName.length() : 0);
+
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Profile Name")
+                        .setMessage("Enter your name for the Home greeting:")
+                        .setView(input)
+                        .setPositiveButton("Save", (d, w) -> {
+                            String next = input.getText().toString().trim();
+                            if (!next.isEmpty()) {
+                                SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
+                                sp.edit().putString("profile_name", next).apply();
+                                nativeApplyLoadedPrefs(
+                                        sp.getBoolean("setup_done", false),
+                                        next,
+                                        sp.getString("lang_code", "en"),
+                                        sp.getBoolean("classic_look", false),
+                                        sp.getBoolean("weather_enabled", true),
+                                        sp.getBoolean("weather_auto", true),
+                                        sp.getString("weather_city", ""));
+                            }
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
+            } catch (Throwable ignored) { }
+        });
+    }
+
+    public void promptWeatherCityFromRust(final String currentCity) {
+        runOnUiThread(() -> {
+            try {
+                final EditText input = new EditText(this);
+                input.setSingleLine(true);
+                input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+                input.setImeOptions(EditorInfo.IME_ACTION_DONE);
+                input.setHint("e.g. Srinagar, Mumbai, New Delhi");
+                input.setText(currentCity);
+                input.setSelection(currentCity != null ? currentCity.length() : 0);
+
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Choose Weather City")
+                        .setMessage("Enter a city name for live Home weather:")
+                        .setView(input)
+                        .setPositiveButton("Save & Fetch", (d, w) -> {
+                            String city = input.getText().toString().trim();
+                            if (!city.isEmpty()) {
+                                SharedPreferences sp = getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE);
+                                sp.edit()
+                                        .putBoolean("weather_enabled", true)
+                                        .putBoolean("weather_auto", false)
+                                        .putString("weather_city", city)
+                                        .apply();
+                                nativeUpdateWeather(city, "Loading...", "");
+                                fetchWeatherFromRust(false, city);
+                            }
+                        })
+                        .setNegativeButton("Cancel", null)
+                        .show();
+            } catch (Throwable ignored) { }
+        });
+    }
+
+    public void fetchWeatherFromRust(final boolean autoDetect, final String manualCity) {
+        new Thread(() -> {
+            try {
+                double lat = Double.NaN;
+                double lon = Double.NaN;
+                String resolvedCity = manualCity != null ? manualCity.trim() : "";
+
+                if (autoDetect || resolvedCity.isEmpty()) {
+                    // Auto-detect city & coordinates via lightweight IP geolocation
+                    String ipJson = fetchUrlText("https://ipwho.is/");
+                    if (ipJson != null) {
+                        JSONObject j = new JSONObject(ipJson);
+                        if (j.optBoolean("success", false)) {
+                            lat = j.optDouble("latitude", Double.NaN);
+                            lon = j.optDouble("longitude", Double.NaN);
+                            resolvedCity = j.optString("city", "");
+                        }
+                    }
+                    if (Double.isNaN(lat)) {
+                        String ip2 = fetchUrlText("http://ip-api.com/json/?fields=status,city,lat,lon");
+                        if (ip2 != null) {
+                            JSONObject j = new JSONObject(ip2);
+                            if ("success".equalsIgnoreCase(j.optString("status"))) {
+                                lat = j.optDouble("lat", Double.NaN);
+                                lon = j.optDouble("lon", Double.NaN);
+                                resolvedCity = j.optString("city", "");
+                            }
+                        }
+                    }
+                } else {
+                    // Manual city geocoding via Open-Meteo Geocoding API
+                    String geoUrl = "https://geocoding-api.open-meteo.com/v1/search?name="
+                            + URLEncoder.encode(resolvedCity, StandardCharsets.UTF_8)
+                            + "&count=1&language=en&format=json";
+                    String geoBody = fetchUrlText(geoUrl);
+                    if (geoBody != null) {
+                        JSONObject gj = new JSONObject(geoBody);
+                        JSONArray arr = gj.optJSONArray("results");
+                        if (arr != null && arr.length() > 0) {
+                            JSONObject first = arr.getJSONObject(0);
+                            lat = first.optDouble("latitude", Double.NaN);
+                            lon = first.optDouble("longitude", Double.NaN);
+                            resolvedCity = first.optString("name", resolvedCity);
+                        }
+                    }
+                }
+
+                if (Double.isNaN(lat) || Double.isNaN(lon)) {
+                    nativeUpdateWeather(resolvedCity, "", "");
+                    return;
+                }
+
+                String wUrl = String.format(
+                        java.util.Locale.US,
+                        "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current_weather=true",
+                        lat, lon);
+                String wBody = fetchUrlText(wUrl);
+                if (wBody != null) {
+                    JSONObject wj = new JSONObject(wBody);
+                    JSONObject cw = wj.optJSONObject("current_weather");
+                    if (cw != null) {
+                        int tempC = (int) Math.round(cw.optDouble("temperature", 0.0));
+                        int code = cw.optInt("weathercode", 0);
+                        String desc = describeWmoCode(code);
+                        getSharedPreferences("ferrodeck_prefs", Context.MODE_PRIVATE)
+                                .edit()
+                                .putString("weather_city", resolvedCity)
+                                .apply();
+                        nativeUpdateWeather(resolvedCity, tempC + "°C", desc);
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }, "ferrodeck-weather").start();
+    }
+
+    private static String describeWmoCode(int code) {
+        if (code == 0) return "Clear";
+        if (code <= 3) return "Cloudy";
+        if (code == 45 || code == 48) return "Foggy";
+        if (code >= 51 && code <= 67) return "Rain";
+        if (code >= 71 && code <= 77) return "Snow";
+        if (code >= 80 && code <= 82) return "Showers";
+        if (code >= 95) return "Storm";
+        return "Mild";
+    }
+
+    private static String fetchUrlText(String urlStr) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            conn.setConnectTimeout(4000);
+            conn.setReadTimeout(4500);
+            conn.setRequestProperty("User-Agent", "FerroDeck/0.5 (AndroidTV)");
+            if (conn.getResponseCode() != 200) return null;
+            BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            br.close();
+            return sb.toString();
+        } catch (Throwable ignored) {
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     // ------------------------------------------------------------------ App Long-Press Actions (JNI)

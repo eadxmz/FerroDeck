@@ -4,6 +4,7 @@ mod clock;
 mod glyphs;
 mod input;
 mod settings_pill;
+mod setup_wizard;
 mod ui;
 
 use crate::input::{
@@ -43,6 +44,10 @@ enum PendingJavaCall {
     DisableApp(String),
     StartVoiceAssistant,
     SearchInPackage(String, String),
+    PromptProfileName(String),
+    PromptWeatherCity(String),
+    FetchWeather(bool, String),
+    SavePrefs,
     Effect(SideEffect),
 }
 
@@ -387,6 +392,48 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                             );
                         }
                     }
+                    PendingJavaCall::PromptProfileName(cur) => {
+                        if let Ok(jc) = env.new_string(&cur) {
+                            let _ = env.call_method(&act_obj, "promptProfileNameFromRust", "(Ljava/lang/String;)V", &[(&jc).into()]);
+                        }
+                    }
+                    PendingJavaCall::PromptWeatherCity(cur) => {
+                        if let Ok(jc) = env.new_string(&cur) {
+                            let _ = env.call_method(&act_obj, "promptWeatherCityFromRust", "(Ljava/lang/String;)V", &[(&jc).into()]);
+                        }
+                    }
+                    PendingJavaCall::FetchWeather(auto_det, city) => {
+                        if let Ok(jc) = env.new_string(&city) {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "fetchWeatherFromRust",
+                                "(ZLjava/lang/String;)V",
+                                &[JValue::Bool(if auto_det { 1 } else { 0 }), (&jc).into()],
+                            );
+                        }
+                    }
+                    PendingJavaCall::SavePrefs => {
+                        if let (Ok(jn), Ok(jl), Ok(jc)) = (
+                            env.new_string(&st.ui.user_name),
+                            env.new_string(st.ui.lang_code),
+                            env.new_string(&st.ui.weather_city),
+                        ) {
+                            let _ = env.call_method(
+                                &act_obj,
+                                "savePrefsFromRust",
+                                "(ZLjava/lang/String;Ljava/lang/String;ZZZLjava/lang/String;)V",
+                                &[
+                                    JValue::Bool(if st.ui.setup_done { 1 } else { 0 }),
+                                    (&jn).into(),
+                                    (&jl).into(),
+                                    JValue::Bool(if st.ui.classic_look { 1 } else { 0 }),
+                                    JValue::Bool(if st.ui.weather_enabled { 1 } else { 0 }),
+                                    JValue::Bool(if st.ui.weather_auto { 1 } else { 0 }),
+                                    (&jc).into(),
+                                ],
+                            );
+                        }
+                    }
                     PendingJavaCall::Effect(eff) => match eff {
                         SideEffect::None => {}
                         SideEffect::OpenWifiSettings => {
@@ -444,6 +491,48 @@ fn dispatch_java_calls(app: &AndroidApp, st: &mut SharedState) {
                                 &[JValue::Bool(if on { 1 } else { 0 })],
                             );
                         }
+                        SideEffect::PromptProfileName => {
+                            if let Ok(jc) = env.new_string(&st.ui.user_name) {
+                                let _ = env.call_method(&act_obj, "promptProfileNameFromRust", "(Ljava/lang/String;)V", &[(&jc).into()]);
+                            }
+                        }
+                        SideEffect::PromptWeatherCity => {
+                            if let Ok(jc) = env.new_string(&st.ui.weather_city) {
+                                let _ = env.call_method(&act_obj, "promptWeatherCityFromRust", "(Ljava/lang/String;)V", &[(&jc).into()]);
+                            }
+                        }
+                        SideEffect::FetchWeatherNow => {
+                            if let Ok(jc) = env.new_string(&st.ui.weather_city) {
+                                let _ = env.call_method(
+                                    &act_obj,
+                                    "fetchWeatherFromRust",
+                                    "(ZLjava/lang/String;)V",
+                                    &[JValue::Bool(if st.ui.weather_auto { 1 } else { 0 }), (&jc).into()],
+                                );
+                            }
+                        }
+                        SideEffect::SavePrefs => {
+                            if let (Ok(jn), Ok(jl), Ok(jc)) = (
+                                env.new_string(&st.ui.user_name),
+                                env.new_string(st.ui.lang_code),
+                                env.new_string(&st.ui.weather_city),
+                            ) {
+                                let _ = env.call_method(
+                                    &act_obj,
+                                    "savePrefsFromRust",
+                                    "(ZLjava/lang/String;Ljava/lang/String;ZZZLjava/lang/String;)V",
+                                    &[
+                                        JValue::Bool(if st.ui.setup_done { 1 } else { 0 }),
+                                        (&jn).into(),
+                                        (&jl).into(),
+                                        JValue::Bool(if st.ui.classic_look { 1 } else { 0 }),
+                                        JValue::Bool(if st.ui.weather_enabled { 1 } else { 0 }),
+                                        JValue::Bool(if st.ui.weather_auto { 1 } else { 0 }),
+                                        (&jc).into(),
+                                    ],
+                                );
+                            }
+                        }
                     },
                 }
             }
@@ -499,6 +588,65 @@ fn apply_bound_action(st: &mut SharedState, act: BoundAction) {
         BoundAction::LaunchApp(pkg) => {
             st.pending_calls.push(PendingJavaCall::LaunchPkg(pkg));
         }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeApplyLoadedPrefs(
+    mut env: JNIEnv,
+    _class: JClass,
+    setup_done: jboolean,
+    profile_name: JString,
+    lang_code: JString,
+    classic_look: jboolean,
+    weather_enabled: jboolean,
+    weather_auto: jboolean,
+    weather_city: JString,
+) {
+    let name: String = env.get_string(&profile_name).map(|s| s.into()).unwrap_or_default();
+    let lang: String = env.get_string(&lang_code).map(|s| s.into()).unwrap_or_default();
+    let city: String = env.get_string(&weather_city).map(|s| s.into()).unwrap_or_default();
+
+    if let Ok(mut st) = STATE.lock() {
+        st.ui.setup_done = setup_done != 0;
+        if !name.trim().is_empty() {
+            st.ui.user_name = name.trim().to_string();
+        }
+        if let Some(entry) = crate::ui::ALL_LANGUAGES.iter().find(|l| l.code == lang.as_str()) {
+            st.ui.lang_code = entry.code;
+            st.ui.lang_region_global = !entry.is_native_india;
+            st.ui.setup.lang_region_global = !entry.is_native_india;
+        }
+        st.ui.classic_look = classic_look != 0;
+        st.ui.clock_style = if st.ui.classic_look { 1 } else { 0 };
+        st.ui.weather_enabled = weather_enabled != 0;
+        st.ui.weather_auto = weather_auto != 0;
+        st.ui.weather_city = city;
+        if !st.ui.setup_done {
+            st.ui.setup.open_fresh();
+        }
+        st.request_redraw();
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_com_eadxmz_ferrodeck_MainActivity_nativeUpdateWeather(
+    mut env: JNIEnv,
+    _class: JClass,
+    city: JString,
+    temp_text: JString,
+    desc_text: JString,
+) {
+    let c: String = env.get_string(&city).map(|s| s.into()).unwrap_or_default();
+    let t: String = env.get_string(&temp_text).map(|s| s.into()).unwrap_or_default();
+    let d: String = env.get_string(&desc_text).map(|s| s.into()).unwrap_or_default();
+    if let Ok(mut st) = STATE.lock() {
+        if !c.is_empty() {
+            st.ui.weather_city = c;
+        }
+        st.ui.weather_temp = t;
+        st.ui.weather_desc = d;
+        st.request_redraw();
     }
 }
 
@@ -779,7 +927,117 @@ fn persist_dock_order(st: &mut SharedState) {
     st.pending_calls.push(PendingJavaCall::SaveDockOrder(csv.join(",")));
 }
 
+fn execute_setup_action(st: &mut SharedState, action_id: &str) {
+    match action_id {
+        "setup_next" => {
+            st.ui.setup.next_step();
+            if !st.ui.setup.open {
+                st.ui.setup_done = true;
+                st.pending_calls.push(PendingJavaCall::SavePrefs);
+            }
+        }
+        "setup_finish" => {
+            st.ui.setup.open = false;
+            st.ui.setup_done = true;
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
+            if st.ui.weather_enabled {
+                st.pending_calls.push(PendingJavaCall::FetchWeather(
+                    st.ui.weather_auto,
+                    st.ui.weather_city.clone(),
+                ));
+            }
+        }
+        "setup_toggle_lang_region" => {
+            st.ui.setup.lang_region_global = !st.ui.setup.lang_region_global;
+            st.ui.lang_region_global = st.ui.setup.lang_region_global;
+        }
+        id if id.starts_with("set_lang:") => {
+            let code = &id["set_lang:".len()..];
+            if let Some(entry) = crate::ui::ALL_LANGUAGES.iter().find(|l| l.code == code) {
+                st.ui.lang_code = entry.code;
+                st.pending_calls.push(PendingJavaCall::SavePrefs);
+            }
+        }
+        "setup_edit_name" => {
+            st.pending_calls
+                .push(PendingJavaCall::PromptProfileName(st.ui.user_name.clone()));
+        }
+        "setup_cycle_avatar" => {
+            st.ui.setup.avatar_idx =
+                (st.ui.setup.avatar_idx + 1) % crate::setup_wizard::AVATAR_COLORS.len();
+        }
+        "setup_weather_auto" => {
+            st.ui.weather_enabled = true;
+            st.ui.weather_auto = true;
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
+            st.pending_calls
+                .push(PendingJavaCall::FetchWeather(true, String::new()));
+        }
+        "setup_weather_manual" => {
+            st.ui.weather_enabled = true;
+            st.ui.weather_auto = false;
+            st.pending_calls
+                .push(PendingJavaCall::PromptWeatherCity(st.ui.weather_city.clone()));
+        }
+        "setup_weather_off" => {
+            st.ui.weather_enabled = false;
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
+        }
+        "setup_look_scenes" => {
+            st.ui.classic_look = false;
+            st.ui.clock_style = 0;
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
+        }
+        "setup_look_classic" => {
+            st.ui.classic_look = true;
+            st.ui.clock_style = 1;
+            st.pending_calls.push(PendingJavaCall::SavePrefs);
+        }
+        "setup_capture_voice" => {
+            st.mapper.capture_target = CaptureTarget::VoiceAssistant;
+            st.mapper.voice_key_label = "Press remote button now...".into();
+            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
+        }
+        "setup_capture_cc" => {
+            st.mapper.capture_target = CaptureTarget::ControlCenter;
+            st.mapper.last_captured_label = "Press remote button now...".into();
+            st.pending_calls.push(PendingJavaCall::SetKeyCaptureFlag(true));
+        }
+        "setup_default_home" => {
+            st.pending_calls
+                .push(PendingJavaCall::Effect(SideEffect::OpenDefaultHomePicker));
+        }
+        "setup_a11y" => {
+            st.pending_calls
+                .push(PendingJavaCall::Effect(SideEffect::OpenAccessibilitySettings));
+        }
+        "setup_adb_easy" => {
+            st.pending_calls
+                .push(PendingJavaCall::Effect(SideEffect::RunAdbPairAndGrant));
+        }
+        _ => {}
+    }
+}
+
 fn activate_ok_press(st: &mut SharedState, row_count: usize) {
+    if st.ui.setup.open {
+        let opts = st.ui.setup.build_options(
+            st.ui.lang_code,
+            &st.ui.user_name,
+            st.ui.weather_auto,
+            st.ui.weather_enabled,
+            &st.ui.weather_city,
+            st.ui.classic_look,
+            &st.mapper.voice_key_label,
+            st.ui.sys.default_home,
+            st.ui.sys.a11y_enabled,
+        );
+        if let Some(opt) = opts.get(st.ui.setup.selected) {
+            execute_setup_action(st, opt.action_id);
+        }
+        return;
+    }
+
     if st.ui.app_menu.open {
         execute_app_menu_selection(st);
         return;
@@ -936,6 +1194,64 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
         0
     };
 
+    if st.ui.setup.open {
+        let setup_len = st
+            .ui
+            .setup
+            .build_options(
+                st.ui.lang_code,
+                &st.ui.user_name,
+                st.ui.weather_auto,
+                st.ui.weather_enabled,
+                &st.ui.weather_city,
+                st.ui.classic_look,
+                &st.mapper.voice_key_label,
+                st.ui.sys.default_home,
+                st.ui.sys.a11y_enabled,
+            )
+            .len();
+        match kc {
+            AKEYCODE_DPAD_UP => {
+                st.ui.setup.move_up(setup_len);
+                st.needs_redraw = true;
+                return true;
+            }
+            AKEYCODE_DPAD_DOWN => {
+                st.ui.setup.move_down(setup_len);
+                st.needs_redraw = true;
+                return true;
+            }
+            AKEYCODE_DPAD_LEFT => {
+                if st.ui.setup.step == 1 {
+                    let n = crate::setup_wizard::AVATAR_COLORS.len();
+                    st.ui.setup.avatar_idx = (st.ui.setup.avatar_idx + n - 1) % n;
+                    st.needs_redraw = true;
+                    return true;
+                }
+            }
+            AKEYCODE_DPAD_RIGHT => {
+                if st.ui.setup.step == 1 {
+                    st.ui.setup.avatar_idx =
+                        (st.ui.setup.avatar_idx + 1) % crate::setup_wizard::AVATAR_COLORS.len();
+                    st.needs_redraw = true;
+                    return true;
+                }
+            }
+            AKEYCODE_BACK => {
+                if st.ui.setup.step > 0 {
+                    st.ui.setup.prev_step();
+                } else {
+                    st.ui.setup.open = false;
+                    st.ui.setup_done = true;
+                    st.pending_calls.push(PendingJavaCall::SavePrefs);
+                }
+                st.needs_redraw = true;
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     match kc {
         AKEYCODE_DPAD_LEFT => {
             st.ui.move_dpad(-1, 0, row_count);
@@ -972,6 +1288,7 @@ fn handle_key_event(st: &mut SharedState, kc: i32, sc: i32, action: KeyAction, r
                 st.ok_pressed_at = Some(Instant::now());
                 st.ok_long_fired = false;
             } else if !st.ok_long_fired
+                && !st.ui.setup.open
                 && !st.ui.app_menu.open
                 && !st.ui.search_ui.open
                 && !st.ui.settings.open
@@ -1089,6 +1406,23 @@ pub fn android_main(app: AndroidApp) {
     let tz_offset = refresh_timezone_offset(&app).unwrap_or(0);
 
     if let Ok(mut st) = STATE.lock() {
+        // Preserve any apps, weather, or setup prefs already pushed by MainActivity.onCreate()
+        let prev_apps = std::mem::take(&mut st.ui.apps);
+        let prev_hidden = std::mem::take(&mut st.ui.hidden_apps);
+        let prev_setup_done = st.ui.setup_done;
+        let prev_setup_open = st.ui.setup.open;
+        let prev_name = st.ui.user_name.clone();
+        let prev_lang = st.ui.lang_code;
+        let prev_lang_global = st.ui.lang_region_global;
+        let prev_classic = st.ui.classic_look;
+        let prev_clock_style = st.ui.clock_style;
+        let prev_w_en = st.ui.weather_enabled;
+        let prev_w_auto = st.ui.weather_auto;
+        let prev_w_city = st.ui.weather_city.clone();
+        let prev_w_temp = st.ui.weather_temp.clone();
+        let prev_w_desc = st.ui.weather_desc.clone();
+        let prev_sys = st.ui.sys.clone();
+
         st.waker = Some(app.create_waker());
         st.tz_offset_ms = tz_offset;
         st.ui = LauncherUi::new(
@@ -1098,6 +1432,30 @@ pub fn android_main(app: AndroidApp) {
             reg_font.as_deref(),
             settings_icon,
         );
+        if !prev_apps.is_empty() {
+            // Re-attach the settings gear icon if it was missing before asset load
+            let mut apps_clean: Vec<AppTile> = prev_apps
+                .into_iter()
+                .filter(|a| a.package_name != SETTINGS_TILE_PKG)
+                .collect();
+            st.ui.set_apps(apps_clean.drain(..).collect());
+        }
+        st.ui.hidden_apps = prev_hidden;
+        st.ui.setup_done = prev_setup_done;
+        st.ui.setup.open = prev_setup_open || !prev_setup_done;
+        st.ui.user_name = prev_name;
+        st.ui.lang_code = prev_lang;
+        st.ui.lang_region_global = prev_lang_global;
+        st.ui.setup.lang_region_global = prev_lang_global;
+        st.ui.classic_look = prev_classic;
+        st.ui.clock_style = prev_clock_style;
+        st.ui.weather_enabled = prev_w_en;
+        st.ui.weather_auto = prev_w_auto;
+        st.ui.weather_city = prev_w_city;
+        st.ui.weather_temp = prev_w_temp;
+        st.ui.weather_desc = prev_w_desc;
+        st.ui.sys = prev_sys;
+
         load_scene_into_ui(&app, &mut st);
     }
 
@@ -1159,6 +1517,7 @@ pub fn android_main(app: AndroidApp) {
             if let Some(down_at) = st.ok_pressed_at {
                 if !st.ok_long_fired
                     && down_at.elapsed() >= Duration::from_millis(480)
+                    && !st.ui.setup.open
                     && !st.ui.app_menu.open
                     && !st.ui.search_ui.open
                     && !st.ui.settings.open
@@ -1199,19 +1558,62 @@ pub fn android_main(app: AndroidApp) {
                                 let x = ptr.x();
                                 let y = ptr.y();
                                 let mut st = STATE.lock().unwrap();
+                                if st.ui.setup.open {
+                                    let (sw, sh) = st.screen_dims;
+                                    let unit = (sw / 960.0).min(sh / 540.0);
+                                    // Top-right Skip Setup pill tap
+                                    if x >= sw - 160.0 * unit && y <= 66.0 * unit {
+                                        execute_setup_action(&mut st, "setup_finish");
+                                        st.needs_redraw = true;
+                                        return InputStatus::Handled;
+                                    }
+                                    let opts = st.ui.setup.build_options(
+                                        st.ui.lang_code,
+                                        &st.ui.user_name,
+                                        st.ui.weather_auto,
+                                        st.ui.weather_enabled,
+                                        &st.ui.weather_city,
+                                        st.ui.classic_look,
+                                        &st.mapper.voice_key_label,
+                                        st.ui.sys.default_home,
+                                        st.ui.sys.a11y_enabled,
+                                    );
+                                    let list_top = if st.ui.setup.step == 1 {
+                                        (192.0 * unit).round()
+                                    } else {
+                                        (146.0 * unit).round()
+                                    };
+                                    let card_w = (460.0 * unit).round();
+                                    let card_x = ((sw - card_w) * 0.5).round();
+                                    let row_h = (42.0 * unit).round();
+                                    let row_gap = (9.0 * unit).round();
+                                    let max_vis = 6usize;
+                                    let start_idx = if st.ui.setup.selected >= max_vis {
+                                        st.ui.setup.selected + 1 - max_vis
+                                    } else {
+                                        0
+                                    };
+                                    if x >= card_x && x <= card_x + card_w {
+                                        for vis_i in 0..max_vis.min(opts.len().saturating_sub(start_idx)) {
+                                            let ry = list_top + (vis_i as f32) * (row_h + row_gap);
+                                            if y >= ry && y <= ry + row_h {
+                                                let abs_i = start_idx + vis_i;
+                                                st.ui.setup.selected = abs_i;
+                                                execute_setup_action(&mut st, opts[abs_i].action_id);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    st.needs_redraw = true;
+                                    return InputStatus::Handled;
+                                }
                                 if st.ui.app_menu.open {
-                                    // Tap inside app context menu selects row or dismisses
+                                    // Compact Liquid Glass app context menu hit-test
                                     let (sw, sh) = st.screen_dims;
                                     let unit = (sw / 960.0).min(sh / 540.0);
                                     let items = st.ui.app_menu_items();
-                                    let panel_w = (360.0 * unit).round();
-                                    let row_h = (36.0 * unit).round();
-                                    let row_gap = (7.0 * unit).round();
-                                    let header_h = (56.0 * unit).round();
-                                    let pad = (18.0 * unit).round();
-                                    let panel_h = pad * 2.0 + header_h + (items.len() as f32) * (row_h + row_gap);
-                                    let px = ((sw - panel_w) * 0.5).round();
-                                    let py = ((sh - panel_h) * 0.5).round();
+                                    let (px, py, panel_w, panel_h, pad, header_h, row_h, row_gap) =
+                                        st.ui.app_menu_geometry(sw, sh, unit);
                                     if x < px || x > px + panel_w || y < py || y > py + panel_h {
                                         st.ui.app_menu.open = false;
                                     } else {
